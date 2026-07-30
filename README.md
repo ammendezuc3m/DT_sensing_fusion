@@ -2,7 +2,7 @@
 
 Passive 5G SSB sensing with a USRP B210, Python UHD processing and PyTorch inference.
 
-This repository implements the **5G sensing component** of a larger Digital Twin system. It receives 5G Synchronization Signal Blocks (SSBs), extracts an `rxGridSSB` representation, applies a trained model and exports the latest inferred state as JSON. The JSON can remain local or be transferred automatically to another computer through SCP.
+This repository implements the **5G SSB and WiFi CSI sensing components** of a larger Digital Twin system. It receives 5G Synchronization Signal Blocks (SSBs), extracts an `rxGridSSB` representation, applies a trained model and exports the latest inferred state as JSON. The JSON can remain local or be transferred automatically to another computer through SCP.
 
 The repository also includes tools for:
 
@@ -10,7 +10,8 @@ The repository also includes tools for:
 - inspecting and analyzing captured datasets;
 - testing compatible PyTorch checkpoints;
 - generating a synchronized Mitsuba/Sionna XML scene;
-- comparing the current Python processing with the historical MATLAB reference workflow.
+- comparing the current Python processing with the historical MATLAB reference workflow;
+- collecting WiFi CSI from IEEE 802.11 OFDM beacon frames.
 
 > [!IMPORTANT]
 > The included `empty` versus `P5` model is a demonstration model trained for one specific laboratory deployment. It is not a general human detector and is not expected to generalize automatically to another room, factory, antenna arrangement, 5G cell or set of positions.
@@ -57,7 +58,7 @@ results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt
 
 ## Repository scope
 
-This repository currently contains the **5G sensing and inference side** of the system.
+This repository currently contains the **5G sensing and inference side**, together with an experimental WiFi CSI acquisition component.
 
 It does include:
 
@@ -2141,9 +2142,12 @@ The most relevant arguments are:
 --device-args       Additional UHD device arguments.
 --channel-index     USRP receive channel index.
 --channel-estimator Channel estimator used by gr-ieee802-11.
+--output             JSON file overwritten with the latest matching CSI sample.
 --dataset-output    Accumulative CSI dataset output file.
 --verbose           Print all decoded beacon frames.
 ```
+
+Passing `--ssid`, `--bssid` and `--wifi-channel` explicitly is recommended. The script contains deployment-specific defaults that may not correspond to an OFDM-compatible access point in another environment.
 
 The complete list of options can be displayed with:
 
@@ -2226,13 +2230,17 @@ CSI shape: (52,)
 
 ## Output files
 
-Runtime-generated CSI files are stored under:
+The receiver generates two runtime outputs:
 
 ```text
-results/wifi_csi/
+results/wifi_csi/latest_csi.json
+results/wifi_csi/csi_dataset.txt
 ```
 
-These datasets are local experimental outputs and are not intended to be committed to the repository.
+- `latest_csi.json` contains only the most recently received matching CSI sample and is overwritten atomically.
+- `csi_dataset.txt` is append-only and contains one line for every matching beacon.
+
+Both files are local runtime outputs and are excluded from Git.
 
 The directory itself is retained in Git through:
 
@@ -2269,7 +2277,7 @@ Completed:
 - labeled dataset collection;
 - dataset analysis;
 - checkpoint testing;
-- optional Mitsuba/Sionna XML output.
+- optional Mitsuba/Sionna XML output;
 - WiFi CSI receiver for OFDM beacon frames.
 
 Future integration work:

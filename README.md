@@ -1940,6 +1940,25 @@ rm results/online/python_5g_online_inference_log.csv
 The script will create it again during the next run.
 
 ---
+## Automatic SSB Discovery
+
+Discover unknown 5G NR FR1 SSBs without prior knowledge of the carrier frequency, band, SCS or NID2.
+
+Example:
+
+```bash
+python scan_5g_ssb_auto.py \
+    --serial <USRP_SERIAL> \
+    --gain 60 \
+    --mode quick
+```
+###Useful options:
+```text
+--start-mhz 3300
+--stop-mhz 3800
+--mode quick|balanced|exhaustive
+```
+---
 
 # Historical MATLAB reference
 

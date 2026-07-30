@@ -136,6 +136,16 @@ sudo apt install -y \
   python3 \
   python3-pip \
   python3-venv \
+  build-essential \
+  cmake \
+  pkg-config \
+  gnuradio \
+  gnuradio-dev \
+  libboost-all-dev \
+  libcppunit-dev \
+  liblog4cpp5-dev \
+  libvolk-dev \
+  pybind11-dev \
   uhd-host \
   python3-uhd
 ```
@@ -146,6 +156,8 @@ These packages install:
 - Python 3;
 - `pip`;
 - support for Python virtual environments;
+- build tools required by GNU Radio out-of-tree modules;
+- GNU Radio and development headers;
 - the UHD command-line utilities;
 - the UHD Python bindings required to control the USRP.
 
@@ -220,7 +232,77 @@ and made available to the virtual environment through:
 
 ---
 
-## Step 6 — Verify the Python UHD installation
+## Step 6 — Install the GNU Radio WiFi modules
+
+The WiFi CSI receiver requires the GNU Radio Out-Of-Tree modules `gr-foo` and `gr-ieee802-11`.
+
+Install them outside the repository to avoid adding third-party source trees to the project:
+
+```bash
+mkdir -p ~/src
+cd ~/src
+```
+
+Install `gr-foo`:
+
+```bash
+git clone https://github.com/bastibl/gr-foo.git
+cd gr-foo
+git checkout maint-3.10
+
+mkdir -p build
+cd build
+
+cmake ..
+make -j"$(nproc)"
+sudo make install
+sudo ldconfig
+```
+
+Install `gr-ieee802-11`:
+
+```bash
+cd ~/src
+
+git clone https://github.com/bastibl/gr-ieee802-11.git
+cd gr-ieee802-11
+git checkout maint-3.10
+
+mkdir -p build
+cd build
+
+cmake ..
+make -j"$(nproc)"
+sudo make install
+sudo ldconfig
+```
+
+Return to the repository root:
+
+```bash
+cd <dir_root>/DT_sensing_fusion
+```
+
+Replace `<dir_root>` with the directory where the repository was cloned.
+
+Verify the GNU Radio WiFi dependencies:
+
+```bash
+python3 - <<'PY'
+from gnuradio import blocks, fft, gr, uhd
+import ieee802_11
+import pmt
+
+assert hasattr(ieee802_11, "frame_equalizer")
+assert hasattr(ieee802_11, "decode_mac")
+
+print("GNU Radio WiFi dependencies: OK")
+PY
+```
+
+---
+
+## Step 7 — Verify the Python UHD installation
 
 Run:
 
@@ -257,7 +339,7 @@ DT_sensing_fusion/.venv_uhd/
 
 ---
 
-## Step 7 — Verify that UHD detects the USRP
+## Step 8 — Verify that UHD detects the USRP
 
 Run:
 
@@ -303,7 +385,7 @@ lsusb
 
 ---
 
-## Step 8 — Probe the USRP
+## Step 9 — Probe the USRP
 
 Run:
 
@@ -344,7 +426,7 @@ This confirms that the physical `RX2` connector can be selected by the sensing s
 
 ---
 
-## Step 9 — Run a complete local 5G sensing test
+## Step 10 — Run a complete local 5G sensing test
 
 This test runs the complete local sensing pipeline:
 
@@ -674,7 +756,7 @@ read JSON from <remote_json_path>
 
 The two paths must refer to the same file.
 
-## Step 10 — Verify SSH connectivity
+## Step 11 — Verify SSH connectivity
 
 Before testing the complete sensing pipeline, verify that the sensing computer can connect to the destination computer through SSH.
 
@@ -734,13 +816,13 @@ active (running)
 
 ---
 
-## Step 11 — Configure passwordless SSH authentication
+## Step 12 — Configure passwordless SSH authentication
 
 The sensing pipeline must transfer the JSON automatically. It cannot stop during every iteration to request the remote user password.
 
 SSH key authentication must therefore be configured before running the pipeline with SCP enabled.
 
-### 11.1 Check whether an SSH key already exists
+### 12.1 Check whether an SSH key already exists
 
 On the sensing computer, run:
 
@@ -759,7 +841,7 @@ The file without `.pub` is the private key and must never be shared.
 
 The `.pub` file is the public key and can be copied to the destination computer.
 
-### 11.2 Create an SSH key if necessary
+### 12.2 Create an SSH key if necessary
 
 If no suitable key exists, generate one:
 
@@ -784,7 +866,7 @@ The generated files are:
 ~/.ssh/id_ed25519.pub
 ```
 
-### 11.3 Copy the public key to the destination computer
+### 12.3 Copy the public key to the destination computer
 
 Run:
 
@@ -810,7 +892,7 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub \
   <remote_user>@<remote_host>
 ```
 
-### 11.4 Verify passwordless SSH access
+### 12.4 Verify passwordless SSH access
 
 Run:
 
@@ -850,7 +932,7 @@ If key authentication is not working, the command will fail immediately instead 
 
 ---
 
-## Step 12 — Verify the remote destination directory
+## Step 13 — Verify the remote destination directory
 
 The directory that will contain the JSON must already exist on the destination computer.
 
@@ -888,7 +970,7 @@ The generic SCP target format is:
 
 ---
 
-## Step 13 — Test SCP independently
+## Step 14 — Test SCP independently
 
 Before enabling SCP inside the sensing pipeline, test it with a small JSON file.
 
@@ -936,7 +1018,7 @@ If this independent test fails, do not start the sensing pipeline yet. Resolve t
 
 ---
 
-## Step 14 — Run the 5G sensing pipeline with SCP enabled
+## Step 15 — Run the 5G sensing pipeline with SCP enabled
 
 Once passwordless SCP works, run the complete sensing pipeline without `--disable-scp`.
 
@@ -994,7 +1076,7 @@ The remote consumer must read that same file.
 
 ---
 
-## Step 15 — Verify the online SCP transfer
+## Step 16 — Verify the online SCP transfer
 
 A successful sensing iteration should contain:
 
@@ -1087,7 +1169,7 @@ Verify the destination fingerprint before accepting it.
 
 ---
 
-## Step 16 — Inspect the remote JSON
+## Step 17 — Inspect the remote JSON
 
 After the sensing test finishes, inspect the file on the destination computer:
 
@@ -1130,7 +1212,7 @@ After the final transfer, both checksums should match.
 
 ---
 
-## Step 17 — Monitor the remote JSON during execution
+## Step 18 — Monitor the remote JSON during execution
 
 The destination computer can monitor the JSON while the sensing pipeline is running.
 
@@ -1947,12 +2029,12 @@ Discover unknown 5G NR FR1 SSBs without prior knowledge of the carrier frequency
 Example:
 
 ```bash
-python scan_5g_ssb_auto.py \
+python src/python/ssb_python/scan_5g_ssb_auto.py \
     --serial <USRP_SERIAL> \
     --gain 60 \
     --mode quick
 ```
-###Useful options:
+### Useful options:
 ```text
 --start-mhz 3300
 --stop-mhz 3800
@@ -2000,6 +2082,176 @@ Use the MATLAB comparison utilities only when investigating extraction differenc
 
 ---
 
+# WiFi CSI Acquisition using USRP B210
+
+This project includes a Python receiver that extracts Channel State Information (CSI) from IEEE 802.11 beacon frames using a USRP B210 and the GNU Radio `gr-ieee802-11` module.
+
+The receiver filters beacon frames by SSID and BSSID and stores one CSI vector per received frame, allowing CSI datasets to be collected for later processing.
+
+## Receiver script
+
+The receiver is located at:
+
+```text
+src/python/wifi_csi/beacon_csi_receiver.py
+```
+
+The required GNU Radio, UHD and `gr-ieee802-11` dependencies must already be available in the project environment as part of the initial project setup.
+
+## Selecting an access point
+
+The receiver must be configured with:
+
+- the SSID of the target access point;
+- its BSSID;
+- the WiFi channel;
+- an appropriate USRP receive gain.
+
+Available access points can be listed with:
+
+```bash
+nmcli -f SSID,BSSID,CHAN,FREQ,SIGNAL dev wifi list
+```
+
+The BSSID identifies the specific radio interface of the access point. Two networks with the same SSID may therefore require different BSSID values.
+
+## Running the receiver
+
+Example:
+
+```bash
+python3 src/python/wifi_csi/beacon_csi_receiver.py \
+  --ssid "eduroam" \
+  --bssid "5C:E1:76:D3:0B:20" \
+  --wifi-channel 11 \
+  --gain 0.60 \
+  --dataset-output results/wifi_csi/csi_dataset.txt
+```
+
+The most relevant arguments are:
+
+```text
+--ssid              Target SSID.
+--bssid             Target BSSID.
+--wifi-channel      WiFi channel used by the access point.
+--frequency         Optional centre frequency in Hz.
+--sample-rate       Receiver sample rate.
+--gain              Normalised UHD receive gain between 0.0 and 1.0.
+--antenna           USRP receive antenna.
+--device-args       Additional UHD device arguments.
+--channel-index     USRP receive channel index.
+--channel-estimator Channel estimator used by gr-ieee802-11.
+--dataset-output    Accumulative CSI dataset output file.
+--verbose           Print all decoded beacon frames.
+```
+
+The complete list of options can be displayed with:
+
+```bash
+python3 src/python/wifi_csi/beacon_csi_receiver.py --help
+```
+
+## Dataset output
+
+The dataset file is append-only while the receiver is running.
+
+Each matching beacon produces one new line containing one complete CSI vector.
+
+The line format is:
+
+```text
+timestamp_ns<TAB>ssid<TAB>bssid<TAB>snr_db<TAB>csi_0,csi_1,...,csi_N
+```
+
+Each CSI coefficient is stored as a Python-compatible complex number:
+
+```text
+real+imagj
+```
+
+Example:
+
+```text
+1785420000123456789	eduroam	5c:e1:76:d3:0b:20	23.4	0.01907947+0.01698885j,0.01259829+0.01777455j,...
+```
+
+For the current legacy OFDM receiver, each decoded frame normally produces a CSI vector with 52 complex subcarrier values.
+
+## Verifying the captured dataset
+
+Count the number of collected CSI samples:
+
+```bash
+wc -l results/wifi_csi/csi_dataset.txt
+```
+
+Inspect the last captured sample:
+
+```bash
+tail -n 1 results/wifi_csi/csi_dataset.txt
+```
+
+Validate the structure and load the last CSI vector:
+
+```bash
+python3 - <<'PY'
+from pathlib import Path
+
+import numpy as np
+
+dataset_path = Path("results/wifi_csi/csi_dataset.txt")
+last_line = dataset_path.read_text(encoding="utf-8").splitlines()[-1]
+
+timestamp_ns, ssid, bssid, snr_db, csi_text = last_line.split("\t")
+
+csi = np.asarray(
+    [complex(value) for value in csi_text.split(",")],
+    dtype=np.complex64,
+)
+
+print("Timestamp:", timestamp_ns)
+print("SSID:", ssid)
+print("BSSID:", bssid)
+print("SNR:", snr_db)
+print("CSI shape:", csi.shape)
+print("CSI:", csi)
+PY
+```
+
+A successful capture with the current receiver should normally report:
+
+```text
+CSI shape: (52,)
+```
+
+## Output files
+
+Runtime-generated CSI files are stored under:
+
+```text
+results/wifi_csi/
+```
+
+These datasets are local experimental outputs and are not intended to be committed to the repository.
+
+The directory itself is retained in Git through:
+
+```text
+results/wifi_csi/.gitkeep
+```
+
+## Compatibility note
+
+CSI extraction relies on the channel estimate generated by the `frame_equalizer` block in `gr-ieee802-11` and propagated through the decoded MAC PDU metadata.
+
+The current receiver supports beacon frames transmitted using legacy IEEE 802.11 OFDM-compatible rates.
+
+Some commercial 2.4 GHz access points transmit beacon frames using legacy DSSS/CCK rates associated with IEEE 802.11b. Such beacons may be visible to a conventional WiFi adapter but are not decoded by this receiver.
+
+A strong signal reported by `nmcli` therefore does not guarantee that the access point beacon uses a PHY format supported by `gr-ieee802-11`.
+
+---
+
 # Current project status
 
 Completed:
@@ -2018,6 +2270,7 @@ Completed:
 - dataset analysis;
 - checkpoint testing;
 - optional Mitsuba/Sionna XML output.
+- WiFi CSI receiver for OFDM beacon frames.
 
 Future integration work:
 

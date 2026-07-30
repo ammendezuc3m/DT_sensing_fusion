@@ -128,3 +128,15 @@ data/python_ssb_datasets/
 # Temporary local files
 test_scp.json
 readme_now.txt
+
+# WiFi CSI runtime outputs
+results/wifi_csi/*
+!results/wifi_csi/.gitkeep
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# 5G SSB scan runtime outputs
+results/ssb_auto_scan/
+results/ssb_scan/

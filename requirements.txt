@@ -2,4 +2,8 @@ numpy<2
 scipy
 h5py
 matplotlib
+pandas
+scikit-learn
+joblib
+tqdm
 torch

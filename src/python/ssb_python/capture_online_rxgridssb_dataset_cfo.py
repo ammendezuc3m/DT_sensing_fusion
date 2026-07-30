@@ -117,6 +117,7 @@ def estimate_cfo_warmup(
                 nfft=args.nfft,
                 nrb_ssb=args.nrb_ssb,
                 force_nid2=args.force_nid2,
+                sample_rate=args.rate,
             )
 
             timing = int(timing_info["timing_offset_samples"])

@@ -124,3 +124,7 @@ data/python_iq_blocks/
 
 # Python labeled SSB datasets
 data/python_ssb_datasets/
+
+# Temporary local files
+test_scp.json
+readme_now.txt

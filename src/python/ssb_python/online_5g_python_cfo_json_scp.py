@@ -98,7 +98,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--log-csv", default="results/online/python_5g_online_inference_log.csv")
     p.add_argument(
         "--remote-target",
-        default="nextnet@163.117.140.146:~/AlbertoDir/demo_5G/5G_inference/live_inference_state_5G.json",
+        default="",
         help="SCP target. Empty string disables SCP.",
     )
     p.add_argument("--disable-scp", action="store_true")

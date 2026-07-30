@@ -117,6 +117,7 @@ def detect_best_pss_timing(
     nfft: int,
     nrb_ssb: int,
     force_nid2: int | None,
+    sample_rate: float,
 ) -> dict:
     candidates: list[dict] = []
 
@@ -134,7 +135,7 @@ def detect_best_pss_timing(
             {
                 "nid2": int(nid2),
                 "timing_offset_samples": idx,
-                "timing_offset_ms": float(1000.0 * idx / 15.36e6),
+                "timing_offset_ms": float(1000.0 * idx / sample_rate),
                 "metric": val,
                 "reference_len_samples": int(len(reference)),
             }
@@ -301,6 +302,7 @@ def main() -> None:
             nfft=args.nfft,
             nrb_ssb=args.nrb_ssb,
             force_nid2=args.force_nid2,
+            sample_rate=args.sample_rate,
         )
     else:
         timing_info = {

@@ -158,6 +158,7 @@ def extract_rxgrid_from_waveform(
         nfft=args.nfft,
         nrb_ssb=args.nrb_ssb,
         force_nid2=args.force_nid2,
+        sample_rate=args.rate,
     )
 
     t1 = time.perf_counter()

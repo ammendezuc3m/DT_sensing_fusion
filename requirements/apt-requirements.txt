@@ -1,5 +1,0 @@
-uhd-host
-python3-uhd
-libuhd4.6.0t64
-libgnuradio-uhd3.10.9t64
-soapysdr0.8-module-uhd

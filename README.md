@@ -1833,6 +1833,55 @@ These plots do not by themselves prove that two classes are separable. They are 
 
 ---
 
+## Analyze and train a generic SSB sensing classifier
+
+`src/python/run_ssb_sensing_analysis.py` is an offline analysis and baseline-classification tool for a labelled collection of SSB sessions. It automatically discovers the available class names from the immediate subdirectories below `--data-root`; there is no fixed list of labels in the script.
+
+The expected local dataset layout is:
+
+```text
+<data-root>/
+  empty/
+    session_<timestamp>_empty_static/
+      session_data.h5
+  P1/
+    session_<timestamp>_P1_static/
+      session_data.h5
+  P2/
+    session_<timestamp>_P2_static/
+      session_data.h5
+```
+
+The directory is collected locally and is intentionally not included in Git. After activating the project virtual environment and installing `requirements.txt`, run:
+
+```bash
+python src/python/run_ssb_sensing_analysis.py \
+  --data-root data/python_ssb_datasets \
+  --output results/ssb_sensing_analysis
+```
+
+For a dataset stored elsewhere, pass its absolute path instead:
+
+```bash
+python src/python/run_ssb_sensing_analysis.py \
+  --data-root /path/to/python_ssb_datasets \
+  --output results/ssb_sensing_analysis
+```
+
+The script estimates an SSB channel response from the SSS and PBCH DM-RS, produces diagnostic channel plots, selects resource elements using a multi-class Fisher score fitted on the training portion only, and trains a balanced logistic-regression baseline. It writes figures, selected REs, detection metadata, a classification report, metrics and a confusion matrix below `--output`.
+
+Optional arguments:
+
+```text
+--top-k N            number of Fisher-selected resource elements (default: 64)
+--random-traces N    random channel-magnitude traces plotted per class (default: 10)
+--seed N             reproducible random seed (default: 42)
+```
+
+The default evaluation splits the time-ordered samples of every class into 60% training, 20% validation and 20% test. This is useful as an initial within-session baseline, but samples from the same acquisition may still occur in different splits. Do not interpret its final-test metrics as performance on an independent experiment. For a deployment claim, reserve entire sessions or collection days for testing.
+
+---
+
 # Test a model checkpoint on a saved dataset
 
 Find the latest dataset:
@@ -2179,6 +2228,7 @@ Use the threshold backend only for development or transport testing. For the act
 | `src/python/ssb_python/capture_online_rxgridssb_dataset_cfo.py` | Lower-level CFO-corrected dataset capture |
 | `src/python/ssb_python/test_rxgrid_torch_checkpoint_on_h5.py` | Tests a checkpoint on a saved H5 dataset |
 | `src/python/ssb_python/analyze_rxgrid_distributions.py` | Generates diagnostic plots for saved datasets |
+| `src/python/run_ssb_sensing_analysis.py` | Generic multi-label SSB analysis, Fisher RE selection and logistic-regression baseline |
 | `src/python/ssb_python/capture_iq_blocks_uhd.py` | Raw IQ capture for low-level debugging |
 | `src/python/ssb_python/compare_interleaved_python_matlab.py` | Historical Python/MATLAB comparison |
 

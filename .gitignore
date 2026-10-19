@@ -140,3 +140,6 @@ __pycache__/
 # 5G SSB scan runtime outputs
 results/ssb_auto_scan/
 results/ssb_scan/
+
+# Offline SSB sensing analysis and Fisher/logistic-regression outputs
+results/ssb_sensing_analysis/

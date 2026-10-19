@@ -4,6 +4,7 @@ h5py
 matplotlib
 pandas
 scikit-learn
+py3gpp
 joblib
 tqdm
 torch

@@ -34,9 +34,11 @@ from __future__ import annotations
 import argparse
 import json
 import warnings
+from collections import Counter
 from pathlib import Path
 
 import h5py
+import joblib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -57,6 +59,9 @@ from py3gpp.nrSSS import nrSSS
 from py3gpp.nrPBCHDMRS import nrPBCHDMRS
 from py3gpp.nrPBCHDMRSIndices import nrPBCHDMRSIndices
 from py3gpp.nrChannelEstimate import nrChannelEstimate
+from ssb_python.ssb_fisher_torch_inference import (
+    export_sklearn_pipeline_as_torch,
+)
 
 
 # ============================================================
@@ -2230,6 +2235,44 @@ def main():
     )
 
     # --------------------------------------------------------
+    # Export deployment checkpoint
+    # --------------------------------------------------------
+    # The online pipeline uses the dominant radio configuration observed in
+    # the labelled sessions. It can be overridden at runtime when required.
+    radio_pairs = [
+        (int(session["pci"]), int(session["ibar"]))
+        for label in labels
+        for session in processed_sessions[label]
+    ]
+    (deployment_pci, deployment_ibar), _ = Counter(radio_pairs).most_common(1)[0]
+    deployment_checkpoint = args.output / "model_fisher_logreg.pt"
+    deployment_joblib = args.output / "model_fisher_logreg.joblib"
+    deployment_metadata = {
+        "classes": labels,
+        "selected_resource_elements": selected_resource_elements,
+        "radio_configuration": {
+            "pci": deployment_pci,
+            "ibar": deployment_ibar,
+        },
+        "empty_labels": [label for label in labels if label.casefold() == "empty"],
+    }
+    joblib.dump(
+        {
+            "pipeline": model,
+            **deployment_metadata,
+        },
+        deployment_joblib,
+    )
+    export_sklearn_pipeline_as_torch(
+        model=model,
+        output_path=deployment_checkpoint,
+        classes=labels,
+        selected_resource_elements=selected_resource_elements,
+        radio_configuration=deployment_metadata["radio_configuration"],
+        empty_labels=deployment_metadata["empty_labels"],
+    )
+
+    # --------------------------------------------------------
     # Save detection summary
     # --------------------------------------------------------
 
@@ -2297,6 +2340,12 @@ def main():
                 "balanced",
             "max_iter":
                 5000,
+            "deployment_checkpoint":
+                str(deployment_checkpoint),
+            "radio_configuration": {
+                "pci": deployment_pci,
+                "ibar": deployment_ibar,
+            },
         },
 
         "exploratory_pca": {
@@ -2388,6 +2437,8 @@ def main():
         "confusion_matrix.csv",
         "detection_summary.json",
         "metrics.json",
+        "model_fisher_logreg.pt",
+        "model_fisher_logreg.joblib",
     ]
 
     for filename in main_files:

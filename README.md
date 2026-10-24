@@ -1870,6 +1870,15 @@ python src/python/run_ssb_sensing_analysis.py \
 
 The script estimates an SSB channel response from the SSS and PBCH DM-RS, produces diagnostic channel plots, selects resource elements using a multi-class Fisher score fitted on the training portion only, and trains a balanced logistic-regression baseline. It writes figures, selected REs, detection metadata, a classification report, metrics and a confusion matrix below `--output`.
 
+It also saves two deployment artifacts:
+
+```text
+model_fisher_logreg.joblib
+model_fisher_logreg.pt
+```
+
+The Joblib file preserves the original scikit-learn pipeline for offline evaluation. The `.pt` file is an equivalent PyTorch checkpoint for the online sensing pipeline; it includes the class names, selected REs, channel-feature definition and the dominant PCI/i_bar configuration observed during training.
+
 Optional arguments:
 
 ```text
@@ -1993,6 +2002,22 @@ src/python/ssb_python/rxgrid_torch_inference.py
 ```
 
 The class list stored in the checkpoint must agree with the labels used during training and with any downstream consumer of the JSON.
+
+## Deploy the generic Fisher SSB model online
+
+The generic Fisher model produced by `run_ssb_sensing_analysis.py` can be used by the same online pipeline that creates the state JSON, Mitsuba XML and optional SCP transfer. Select the `torch-fisher` backend and pass the generated PyTorch artifact:
+
+```bash
+python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
+  --inference-backend torch-fisher \
+  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
+  --enable-mitsuba-export \
+  --mitsuba-position-map-json config/sionna_mitsuba_position_map.json
+```
+
+This backend first estimates `H` from the online `rxGridSSB`, applies the Fisher feature extraction saved with the model, and evaluates the exported PyTorch linear classifier. Labels and their probabilities are read from the checkpoint, so there is no fixed number of position classes.
+
+The checkpoint normally provides PCI and `i_bar_SSB`. If the deployment transmitter configuration differs, override them explicitly with `--fisher-pci` and `--fisher-ibar`. Add every non-empty training label to `config/sionna_mitsuba_position_map.json` so that a predicted position can be represented in the generated Mitsuba scene.
 
 ---
 

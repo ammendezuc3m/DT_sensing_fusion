@@ -48,6 +48,28 @@ Current model loader:
 src/python/ssb_python/rxgrid_torch_inference.py
 ```
 
+## Recommended 5G SSB workflow
+
+For a new sensing deployment, follow this order:
+
+```text
+1. Capture labelled SSB sessions
+   collect_labeled_rxgridssb_dataset_cfo.py
+          ↓
+2. Analyse and train offline
+   run_ssb_sensing_analysis.py
+          ↓
+3. Replay-test the exported checkpoint on H5 data
+   test_rxgrid_torch_checkpoint_on_h5.py
+          ↓
+4. Run online inference
+   online_5g_python_cfo_json_scp.py
+          ↓
+5. Consume the JSON and optional Mitsuba XML locally or through SCP
+```
+
+The repository includes a historical binary `empty`/`P5` CNN for basic hardware checks. New sensing models should use the generic Fisher workflow described below: it discovers the labels from the captured dataset, trains a multi-class model and exports the PyTorch checkpoint used online.
+
 Included demonstration checkpoint:
 
 ```text
@@ -427,9 +449,9 @@ This confirms that the physical `RX2` connector can be selected by the sensing s
 
 ---
 
-## Step 10 — Run a complete local 5G sensing test
+## Step 10 — Run a complete local 5G hardware test
 
-This test runs the complete local sensing pipeline:
+This test verifies that the USRP, DSP and JSON loop work before a newly trained model is deployed. It uses the historical binary demonstration checkpoint included in the repository; it is not the recommended model for a new room or set of positions.
 
 ```text
 USRP B210
@@ -496,13 +518,13 @@ The frequency, sample rate, gain and NID2 values are specific to the current 5G 
 - `--cfo-warmup-iters 30` captures 30 initial blocks to obtain a stable CFO estimate.
 - `--cfo-correction-sign -1` applies the estimated CFO using the sign expected by the current processing pipeline.
 
-### Inference parameters
+### Legacy demonstration inference parameters
 
 - `--inference-backend torch` selects the trained PyTorch neural network.
 - `--torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt` loads the trained model included in the repository.
 - `--torch-device cpu` performs inference using the CPU.
 
-The selected model expects a complex `rxGridSSB` represented using amplitude and phase, with an effective input shape of:
+The selected demonstration model expects a complex `rxGridSSB` represented using amplitude and phase, with an effective input shape of:
 
 ```text
 2 × 240 × 4
@@ -1366,7 +1388,7 @@ If this independent test fails, do not start the sensing pipeline yet. Resolve t
 
 ---
 
-## Step 15 — Run the 5G sensing pipeline with SCP enabled
+## Step 15 — Run the generic 5G sensing pipeline with SCP enabled
 
 Once passwordless SCP works, run the complete sensing pipeline without `--disable-scp`.
 
@@ -1393,8 +1415,8 @@ python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
   --enable-cfo-correction \
   --cfo-warmup-iters 30 \
   --cfo-correction-sign -1 \
-  --inference-backend torch \
-  --torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt \
+  --inference-backend torch-fisher \
+  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
   --torch-device cpu \
   --remote-target <remote_user>@<remote_host>:<remote_directory>/<remote_json_filename> \
   --scp-every 1 \
@@ -1407,7 +1429,7 @@ python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
 - `--scp-every 1` transfers the JSON after every sensing iteration.
 - `--disable-scp` must not be included when remote transfer is required.
 
-The remote target has the following structure:
+The generic model checkpoint must have been created first by the offline training workflow. The remote target has the following structure:
 
 ```text
 <remote_user>@<remote_host>:<remote_json_path>
@@ -1899,11 +1921,11 @@ Find the latest dataset:
 LAST_H5="$(find data/python_ssb_datasets -name session_data.h5 | sort | tail -n 1)"
 ```
 
-Run the included model on up to 30 samples:
+After training the generic model, replay it on up to 30 saved samples:
 
 ```bash
 python src/python/ssb_python/test_rxgrid_torch_checkpoint_on_h5.py \
-  --model-pt results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt \
+  --model-pt results/ssb_sensing_analysis/model_fisher_logreg.pt \
   --input-h5 "$LAST_H5" \
   --max-samples 30
 ```
@@ -1920,88 +1942,14 @@ A successful technical test does not guarantee that the model is appropriate for
 
 ---
 
-# Model checkpoint format
+# Model checkpoint formats
 
-The current online loader expects a PyTorch checkpoint containing:
+Two PyTorch checkpoint formats are supported:
 
-```text
-model_state_dict
-mean
-std
-model_name
-input_shape
-complex_mode
-classes
-config
-```
+- The historical CNN checkpoint, selected by `--inference-backend torch`, is used only for compatibility and hardware checks.
+- The generic Fisher checkpoint, selected by `--inference-backend torch-fisher`, is the deployment artifact produced by the offline trainer.
 
-The expected input convention is:
-
-```text
-input_shape = [2, 240, 4]
-complex_mode = abs_phase
-```
-
-The model input tensor has shape:
-
-```text
-[batch, 2, 240, 4]
-```
-
-Its channels are:
-
-```text
-channel 0 = abs(rxGridSSB)
-channel 1 = angle(rxGridSSB)
-```
-
-Normalization is performed using the values stored in the checkpoint:
-
-```text
-x = (x - mean) / std
-```
-
-The current architecture and loader are implemented in:
-
-```text
-src/python/ssb_python/rxgrid_torch_inference.py
-```
-
----
-
-# Replace the online model
-
-To use another compatible checkpoint, change:
-
-```text
---torch-model
-```
-
-Example:
-
-```bash
-python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
-  ... \
-  --inference-backend torch \
-  --torch-model results/my_new_model/model.pt
-```
-
-No loader change is required when the new checkpoint uses:
-
-```text
-input_shape = [2, 240, 4]
-complex_mode = abs_phase
-```
-
-and the same implemented architecture.
-
-If the architecture, input dimensions or channel representation change, update:
-
-```text
-src/python/ssb_python/rxgrid_torch_inference.py
-```
-
-The class list stored in the checkpoint must agree with the labels used during training and with any downstream consumer of the JSON.
+The generic checkpoint contains the PyTorch linear model, its label list, the selected resource elements, the spectral-feature definition, the empty-scene labels and the radio configuration. The online frontend reconstructs `H` and the features from each received `rxGridSSB` before inference.
 
 ## Deploy the generic Fisher SSB model online
 
@@ -2032,11 +1980,11 @@ For a new room, factory or antenna arrangement:
 5. Collect several labeled sessions for every class.
 6. Inspect the datasets for capture and preprocessing problems.
 7. Split the data correctly into training, validation and test groups.
-8. Train a model using Python-generated `rxGridSSB` data.
-9. Save a checkpoint in the expected format.
-10. Test the checkpoint on saved H5 data.
-11. Run online inference with the new checkpoint.
-12. Configure the remote JSON destination.
+8. Run `run_ssb_sensing_analysis.py` to analyse the signal and train the generic model.
+9. Replay-test `model_fisher_logreg.pt` on saved H5 data.
+10. Add the non-empty class labels to the Mitsuba position map.
+11. Run online inference with `--inference-backend torch-fisher`.
+12. Configure the remote JSON and optional XML destinations.
 13. Validate the state read by the external Digital Twin consumer.
 
 Do not assume that the demonstration checkpoint will work correctly in the new deployment.
@@ -2126,8 +2074,8 @@ python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
   --enable-cfo-correction \
   --cfo-warmup-iters 30 \
   --cfo-correction-sign -1 \
-  --inference-backend torch \
-  --torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt \
+  --inference-backend torch-fisher \
+  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
   --torch-device cpu \
   --mitsuba-position-map-json config/sionna_mitsuba_position_map.json \
   --enable-mitsuba-export \
@@ -2187,8 +2135,8 @@ python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
   --enable-cfo-correction \
   --cfo-warmup-iters 30 \
   --cfo-correction-sign -1 \
-  --inference-backend torch \
-  --torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt \
+  --inference-backend torch-fisher \
+  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
   --torch-device cpu \
   --remote-target <remote_user>@<remote_host>:<remote_directory>/<remote_json_filename> \
   --scp-every 1 \
@@ -2237,8 +2185,8 @@ This is not the trained PyTorch sensing model.
 Use the threshold backend only for development or transport testing. For the actual model pipeline, use:
 
 ```bash
---inference-backend torch \
---torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt
+--inference-backend torch-fisher \
+--fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt
 ```
 
 ---
@@ -2249,11 +2197,12 @@ Use the threshold backend only for development or transport testing. For the act
 |---|---|
 | `src/python/ssb_python/online_5g_python_cfo_json_scp.py` | Complete online Python sensing, inference, JSON, SCP and optional XML export |
 | `src/python/ssb_python/rxgrid_torch_inference.py` | Loads the PyTorch checkpoint and performs inference |
+| `src/python/ssb_python/ssb_fisher_torch_inference.py` | Fisher channel frontend and equivalent PyTorch multi-class inference |
 | `src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py` | Operator-friendly labeled dataset collection |
 | `src/python/ssb_python/capture_online_rxgridssb_dataset_cfo.py` | Lower-level CFO-corrected dataset capture |
 | `src/python/ssb_python/test_rxgrid_torch_checkpoint_on_h5.py` | Tests a checkpoint on a saved H5 dataset |
 | `src/python/ssb_python/analyze_rxgrid_distributions.py` | Generates diagnostic plots for saved datasets |
-| `src/python/run_ssb_sensing_analysis.py` | Generic multi-label SSB analysis, Fisher RE selection and logistic-regression baseline |
+| `src/python/run_ssb_sensing_analysis.py` | Generic multi-label offline analysis, Fisher selection, training and deployment-checkpoint export |
 | `src/python/ssb_python/capture_iq_blocks_uhd.py` | Raw IQ capture for low-level debugging |
 | `src/python/ssb_python/compare_interleaved_python_matlab.py` | Historical Python/MATLAB comparison |
 

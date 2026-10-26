@@ -18,6 +18,10 @@ The repository also includes tools for:
 
 ---
 
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
 ## System architecture
 
 The recommended online pipeline is:

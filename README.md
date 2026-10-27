@@ -1,90 +1,112 @@
 # DT_sensing_fusion
 
-Passive 5G SSB sensing with a USRP B210, Python UHD processing and PyTorch inference.
+Passive 5G SSB sensing with a USRP B210, Python UHD processing, a Fisher + logistic-regression fingerprinting model and a CAPIF-exposed Sensing API.
 
-This repository implements the **5G SSB and WiFi CSI sensing components** of a larger Digital Twin system. It receives 5G Synchronization Signal Blocks (SSBs), extracts an `rxGridSSB` representation, applies a trained model and exports the latest inferred state as JSON. The JSON can remain local or be transferred automatically to another computer through SCP.
+This repository implements the **5G SSB and WiFi CSI sensing components** of a larger Digital Twin system. It receives 5G Synchronization Signal Blocks (SSBs), extracts an `rxGridSSB` representation, estimates the radio channel, classifies the scene with a model trained on your own labelled captures, converts the predicted class into objects with coordinates, and **publishes them through the Sensing API**: a REST API registered in a CAPIF Core Function (3GPP TS 29.222) so that any consumer (Digital Twin, Sionna, dashboards) can discover it and read the results.
 
 The repository also includes tools for:
 
 - collecting labeled 5G sensing datasets;
-- inspecting and analyzing captured datasets;
-- testing compatible PyTorch checkpoints;
-- generating a synchronized Mitsuba/Sionna XML scene;
+- analysing a dataset and training the Fisher + logistic-regression model;
+- replaying a trained checkpoint on saved datasets;
+- running the CAPIF Core Function and the Sensing API;
+- consuming the Sensing API (polling or streaming) and converting results, for example to a Mitsuba/Sionna XML scene;
 - comparing the current Python processing with the historical MATLAB reference workflow;
 - collecting WiFi CSI from IEEE 802.11 OFDM beacon frames.
 
 > [!IMPORTANT]
-> The included `empty` versus `P5` model is a demonstration model trained for one specific laboratory deployment. It is not a general human detector and is not expected to generalize automatically to another room, factory, antenna arrangement, 5G cell or set of positions.
-
----
+> A fingerprinting model is only valid for the deployment where its training data was captured: the same room, receiver and antenna placement, 5G cell and set of positions. It is not a general human detector. Collect a new dataset and retrain for every new deployment.
 
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
+---
+
+## Contents
+
+1. [System architecture](#system-architecture)
+2. [Recommended 5G SSB workflow](#recommended-5g-ssb-workflow)
+3. [Initial setup — fresh computer](#initial-setup--fresh-computer)
+4. [Collect a labeled 5G sensing dataset](#collect-a-labeled-5g-sensing-dataset)
+5. [Analyze a collected dataset](#analyze-a-collected-dataset) and [train the model](#analyze-and-train-the-fisher-ssb-sensing-model)
+6. [Map model labels to coordinates](#map-model-labels-to-objects-and-coordinates)
+7. [Sensing API and CAPIF](#sensing-api-and-capif)
+8. [Run online sensing](#run-online-5g-ssb-sensing)
+9. [Consume the Sensing API](#consume-the-sensing-api)
+10. [Mitsuba/Sionna XML export](#mitsubasionna-xml-export)
+11. [WiFi CSI](#wifi-csi-receiver-files-and-recommended-execution)
+12. [Main scripts](#main-scripts), [tests](#tests), [troubleshooting](#troubleshooting)
+
+---
+
 ## System architecture
 
-The recommended online pipeline is:
-
 ```text
-USRP B210
-  → Python UHD IQ capture
-  → CFO estimation and correction
-  → PSS/NID2 detection and timing synchronization
-  → OFDM demodulation
-  → dataSSB extraction
-  → rxGridSSB extraction
-  → PyTorch inference
-  → local JSON and CSV outputs
-  → optional SCP transfer
-  → optional Mitsuba/Sionna XML export
+Sensing computer
+  USRP B210
+    → Python UHD IQ capture
+    → CFO estimation and correction
+    → PSS/NID2 detection and timing synchronization
+    → OFDM demodulation → dataSSB → rxGridSSB [240 x 4]
+    → radio check: NID2, PCI and i_bar_SSB must match the model
+    → channel estimate H (SSS + PBCH DM-RS) → Fisher features → PyTorch linear model
+    → label → objects + coordinates                 (config/sensing_label_map.json)
+    → POST /sensing/v1/reports  ──────────►  Sensing API (CAPIF AEF, :8090)
+    → local latest-state JSON + CSV log                │ registers "sensing-api" in
+    → optional local Mitsuba XML                       ▼
+                                             CAPIF Core Function (:8080)
+                                                       ▲
+Consumers (Digital Twin, Sionna, dashboards)           │ 1. enrol as API invoker
+  ─────────────────────────────────────────────────────┘ 2. discover "sensing-api" + routing info
+  3. GET /sensing/v1/detections   or   GET /sensing/v1/stream  (Server-Sent Events)
 ```
 
-Main online script:
+Each published detection contains **object type, coordinates, confidence and the sensor that produced it** (for this pipeline: `sensor_type = 5g_ssb`, model `ssb_fisher_logreg`). Consumers convert this standard JSON into whatever representation they need; the repository includes a converter to Mitsuba XML as an example.
 
-```text
-src/python/ssb_python/online_5g_python_cfo_json_scp.py
-```
+Main components:
 
-Current model loader:
-
-```text
-src/python/ssb_python/rxgrid_torch_inference.py
-```
+| Component | Location | Role |
+|---|---|---|
+| Offline analysis and training | `src/python/run_ssb_sensing_analysis.py` | Analyses a labelled dataset, trains the Fisher + logistic-regression model and exports `model_fisher_logreg.pt` |
+| Shared model frontend | `src/python/ssb_python/ssb_fisher_torch_inference.py` | Channel estimation, features, radio check and PyTorch model, shared by training and online inference |
+| Online pipeline | `src/python/ssb_python/online_5g_ssb_sensing.py` | Capture → DSP → inference → Sensing API |
+| Label map | `config/sensing_label_map.json` | Model label → objects and coordinates |
+| CAPIF Core Function | `src/python/sensing_api/capif_core.py` | Provider/invoker enrolment, API publication, discovery and routing |
+| Sensing API (AEF) | `src/python/sensing_api/server.py` | Receives reports and serves detections, history and an event stream |
+| Example consumer | `src/python/sensing_api/consume.py` | CAPIF discovery + polling/streaming + JSON/Mitsuba conversion |
 
 ## Recommended 5G SSB workflow
 
 For a new sensing deployment, follow this order:
 
 ```text
-1. Capture labelled SSB sessions
+1. Capture labelled SSB sessions (one folder per label)
    collect_labeled_rxgridssb_dataset_cfo.py
           ↓
-2. Analyse and train offline
-   run_ssb_sensing_analysis.py
+2. Analyse and train offline (labels discovered automatically from the folders)
+   run_ssb_sensing_analysis.py  →  model_fisher_logreg.pt
           ↓
-3. Replay-test the exported checkpoint on H5 data
-   test_rxgrid_torch_checkpoint_on_h5.py
+3. Replay-test the checkpoint on saved H5 data
+   replay_fisher_checkpoint_on_h5.py
           ↓
-4. Run online inference
-   online_5g_python_cfo_json_scp.py
+4. Give every label its objects and coordinates
+   config/sensing_label_map.json
           ↓
-5. Consume the JSON and optional Mitsuba XML locally or through SCP
-```
-
-The repository includes a historical binary `empty`/`P5` CNN for basic hardware checks. New sensing models should use the generic Fisher workflow described below: it discovers the labels from the captured dataset, trains a multi-class model and exports the PyTorch checkpoint used online.
-
-Included demonstration checkpoint:
-
-```text
-results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt
+5. Start the CAPIF Core Function and the Sensing API
+   python -m sensing_api.capif_core  /  python -m sensing_api.server
+          ↓
+6. Run online inference and publish
+   online_5g_ssb_sensing.py
+          ↓
+7. Consumers discover the Sensing API through CAPIF and read the detections
 ```
 
 ---
 
 ## Repository scope
 
-This repository currently contains the **5G sensing and inference side**, together with an experimental WiFi CSI acquisition component.
+This repository currently contains the **5G sensing, inference and publication side**, together with an experimental WiFi CSI acquisition component.
 
 It does include:
 
@@ -92,23 +114,24 @@ It does include:
 - Python-only 5G SSB processing;
 - CFO correction;
 - `dataSSB` and `rxGridSSB` extraction;
-- PyTorch inference;
-- local JSON generation;
-- local CSV logging;
-- SCP delivery;
 - dataset collection and analysis;
+- Fisher + logistic-regression training and PyTorch deployment;
+- online inference with per-grid radio validation;
+- the label-to-coordinates map;
+- a CAPIF Core Function and the CAPIF-exposed Sensing API;
+- an example Sensing API consumer;
+- local JSON and CSV outputs;
 - Mitsuba/Sionna XML generation;
 - historical MATLAB validation utilities.
 
 It does not currently include:
 
 - the complete Isaac Sim application;
-- the script that continuously reads the JSON inside Isaac Sim;
 - Digital Twin scene update logic;
 - MikroTik integration;
 - complete orchestration of every Digital Twin component.
 
-The remote path configured in this repository must later match the path read by the external Digital Twin consumer.
+Older models (the binary CNN, threshold backend, ROI/hybrid experiments) and the SCP delivery scripts are kept for reference in [`legacy_models/`](legacy_models/README.md). They are not used by the current pipeline.
 
 ---
 
@@ -455,7 +478,7 @@ This confirms that the physical `RX2` connector can be selected by the sensing s
 
 ## Step 10 — Run a complete local 5G hardware test
 
-This test verifies that the USRP, DSP and JSON loop work before a newly trained model is deployed. It uses the historical binary demonstration checkpoint included in the repository; it is not the recommended model for a new room or set of positions.
+This test verifies that the USRP, the 5G processing chain and the local outputs work **before any model exists**. It runs the online script in `--dsp-only` mode: every block is captured and processed, but no classifier is applied and nothing is published.
 
 ```text
 USRP B210
@@ -465,17 +488,17 @@ USRP B210
   → OFDM demodulation
   → dataSSB extraction
   → rxGridSSB extraction
-  → PyTorch model inference
+  → validity checks
   → local JSON output
   → local CSV log
 ```
 
-SCP transfer and Mitsuba export are disabled during this first test. This allows the complete sensing and inference pipeline to be validated locally before configuring a remote Digital Twin machine.
+The Sensing API and Mitsuba export are disabled during this first test, so the radio chain can be validated on its own.
 
 Replace `<serial_id>` with the serial number reported by `uhd_find_devices`:
 
 ```bash
-python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
+python src/python/ssb_python/online_5g_ssb_sensing.py \
   --serial <serial_id> \
   --freq 3541.44e6 \
   --rate 15.36e6 \
@@ -489,14 +512,13 @@ python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
   --enable-cfo-correction \
   --cfo-warmup-iters 30 \
   --cfo-correction-sign -1 \
-  --inference-backend torch \
-  --torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt \
-  --torch-device cpu \
-  --disable-scp \
+  --dsp-only \
+  --label-map config/sensing_label_map.json \
+  --disable-api \
   --progress-every 1
 ```
 
-The command must be executed from the repository root because the model, configuration and output locations use relative paths.
+The command must be executed from the repository root because the configuration and output locations use relative paths.
 
 ### USRP and capture parameters
 
@@ -513,7 +535,7 @@ The command must be executed from the repository root because the model, configu
 - `--channel 0` selects the logical receive chain;
 - `--antenna RX2` selects the physical antenna input used by that receive chain.
 
-The frequency, sample rate, gain and NID2 values are specific to the current 5G deployment. They may need to be changed when receiving a different 5G cell or using another experimental configuration.
+The frequency, sample rate, gain and NID2 values are specific to the current 5G deployment. They may need to be changed when receiving a different 5G cell or using another experimental configuration. Use [Automatic SSB Discovery](#automatic-ssb-discovery) when they are unknown.
 
 ### 5G processing parameters
 
@@ -522,51 +544,27 @@ The frequency, sample rate, gain and NID2 values are specific to the current 5G 
 - `--cfo-warmup-iters 30` captures 30 initial blocks to obtain a stable CFO estimate.
 - `--cfo-correction-sign -1` applies the estimated CFO using the sign expected by the current processing pipeline.
 
-### Legacy demonstration inference parameters
-
-- `--inference-backend torch` selects the trained PyTorch neural network.
-- `--torch-model results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt` loads the trained model included in the repository.
-- `--torch-device cpu` performs inference using the CPU.
-
-The selected demonstration model expects a complex `rxGridSSB` represented using amplitude and phase, with an effective input shape of:
-
-```text
-2 × 240 × 4
-```
-
-The two channels correspond to:
-
-```text
-channel 0 = amplitude
-channel 1 = phase
-```
-
 ### Execution and output parameters
 
-- `--num-iters 30` performs 30 sensing iterations.
-- `--warmup-iters 5` reserves initial iterations for execution warmup where applicable.
+- `--num-iters 30` performs 30 sensing iterations (`0` runs forever).
+- `--warmup-iters 5` discards the first 5 captured blocks before the loop starts, while the receiver settles.
+- `--dsp-only` runs without a model.
+- `--disable-api` does not publish to the Sensing API.
 - `--progress-every 1` prints the result of every iteration.
-- `--disable-scp` prevents remote JSON transfer during the local validation test.
 
 ### How to verify that the test succeeded
 
 At startup, the script should report information similar to:
 
 ```text
-=== Full Python 5G online inference ===
-model type:         torch_cnn2d_abs_phase
-inference backend:  torch
-torch model:        results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt
+=== Online 5G SSB sensing ===
+model:              none (--dsp-only)
+label map:          config/sensing_label_map.json (frame=world)
+sensor id:          5g-ssb-rx-01
+Sensing API:        disabled
 local JSON:         results/online/live_inference_state_5G.json
-remote target:      SCP disabled
+mitsuba export:     disabled
 ```
-
-This confirms that:
-
-- the PyTorch inference backend was selected;
-- the trained repository model was loaded;
-- the local JSON output path was configured;
-- SCP transfer was intentionally disabled.
 
 The USRP configuration should report:
 
@@ -595,30 +593,32 @@ Ideally, all or most warmup iterations should be valid.
 
 A non-zero CFO estimate is normal. It represents the frequency offset between the transmitter and receiver oscillators.
 
-After warmup, the script enters the online sensing loop. Each iteration produces a line similar to:
+After warmup, the script enters the online loop. Each iteration produces a line similar to:
 
 ```text
-[<iteration>] valid=1 label=<predicted_label> conf=<confidence> rx_mean=<mean_amplitude> pss=<pss_metric> loop=<loop_time_ms> ms scp=0 mitsuba=0 mitsuba_scp=0 err=
+[<iteration>] valid=1 label=NONE conf=- objs=0 rx_mean=<mean_amplitude> pss=<pss_metric> loop=<loop_time_ms> ms api=off err=
 ```
+
+In `--dsp-only` mode `label` is `NONE` because no classifier runs; `valid=1` means the block passed the signal-processing checks.
 
 The fields mean:
 
-- `valid=1`: the captured block passed the signal-processing validation.
-- `label`: class predicted by the PyTorch model.
+- `valid=1`: the captured block passed validation (and, with a model, the radio check).
+- `label`: class predicted by the model; `NONE` in `--dsp-only` mode and `INVALID` when the iteration is invalid.
 - `conf`: confidence associated with the selected class.
+- `objs`: number of objects published for this iteration (from the label map).
 - `rx_mean`: mean magnitude of the extracted `rxGridSSB`.
 - `pss`: PSS detection metric.
 - `loop`: total capture, processing, inference and output time for the iteration.
-- `scp=0`: SCP was disabled for this test.
-- `mitsuba=0`: Mitsuba XML export was disabled.
-- `mitsuba_scp=0`: no Mitsuba XML was sent remotely.
-- `err=`: no error occurred.
+- `api=<sent>/<failed>`: reports delivered to / rejected by the Sensing API (`api=off` when disabled).
+- `err=`: reason why an iteration is invalid; empty when there is no error.
 
 A block is considered valid when:
 
-- its PSS metric is greater than or equal to the configured minimum;
+- its PSS metric is greater than or equal to the configured minimum (`--min-pss-metric`, default 0.5);
 - the expected six OFDM symbols are extracted;
-- the generated `rxGridSSB` has shape `240 × 4`.
+- the generated `rxGridSSB` has shape `240 × 4`;
+- with a model: NID2, PCI and i_bar_SSB match the model (see [the radio check](#radio-check-pci-and-i_bar_ssb)).
 
 The complete test can be considered successful when:
 
@@ -627,18 +627,9 @@ The complete test can be considered successful when:
 - CFO warmup obtains valid estimates;
 - the sensing iterations show `valid=1`;
 - the PSS metric remains above the configured minimum;
-- the model produces labels and confidence values;
 - `err=` remains empty;
 - the local JSON file is created;
 - the CSV log is created.
-
-The value:
-
-```text
-scp=0
-```
-
-is expected and does not indicate an error because the test uses `--disable-scp`.
 
 ### Prediction rate
 
@@ -660,7 +651,7 @@ means that the complete pipeline is producing approximately:
 1000 / 52.00 ≈ 19.2 predictions per second
 ```
 
-This is the complete loop time, not only the neural-network inference time. It includes capture, 5G processing, model inference, local output and, when enabled, SCP transfer.
+This is the complete loop time, not only the model inference time. It includes capture, 5G processing, model inference and local output. Publishing to the Sensing API runs in a background thread and is not part of the loop time.
 
 ---
 
@@ -680,22 +671,18 @@ After a test with 30 iterations, the latest state should normally contain:
 "iteration": 29
 ```
 
-Important top-level fields include:
+Top-level fields (`schema_version: python_5g_ssb_online_v2`):
 
 - `timestamp_utc`;
 - `iteration`;
 - `valid`;
 - `error`;
-- `label`;
-- `class_id`;
-- `confidence`;
-- `person_detected`;
-- `position`;
-- `probabilities`;
-- `dsp`;
-- `timing_ms`;
-- `grid`;
-- `inference`.
+- `sensor`: sensor id, type (`5g_ssb`), technology, model and radio configuration;
+- `label`, `confidence`, `probabilities`;
+- `detections`: the same objects that are published to the Sensing API;
+- `dsp`: detected NID2, PSS metric, timing offset and number of OFDM symbols;
+- `radio_check`: expected and detected PCI and i_bar_SSB (with a model);
+- `timing_ms`: capture, PSS, OFDM, DSP, inference and loop times.
 
 A valid result should contain:
 
@@ -703,32 +690,6 @@ A valid result should contain:
 "valid": true,
 "error": ""
 ```
-
-The DSP section includes:
-
-- whether CFO correction was enabled;
-- the CFO applied in hertz;
-- the detected NID2;
-- the timing offset;
-- the PSS metric;
-- the number of extracted OFDM symbols.
-
-The grid section should contain:
-
-```json
-"rxGridSSB_shape": [
-    240,
-    4
-]
-```
-
-The inference section identifies the model and should report:
-
-```json
-"model_type": "torch_cnn2d_abs_phase"
-```
-
-It also records the model checkpoint path and the predicted class probabilities.
 
 ---
 
@@ -744,28 +705,815 @@ The CSV stores one row for every sensing iteration.
 
 It includes:
 
-- iteration number;
+- iteration number and UTC timestamp;
 - validation result;
-- predicted label;
-- confidence;
-- class probabilities;
+- predicted label and confidence;
+- probability of the empty labels (`prob_empty`);
+- number of published objects;
 - mean `rxGridSSB` magnitude;
-- PSS metric;
+- PSS metric, NID2, detected PCI and detected i_bar_SSB;
 - applied CFO;
-- capture time;
-- PSS processing time;
-- OFDM processing time;
-- complete DSP time;
-- complete loop time;
-- SCP status;
-- Mitsuba status;
+- capture, PSS, OFDM, DSP, inference and loop times;
+- Sensing API delivery counters;
 - errors.
 
 Unlike the JSON, the current CSV log is appended to rather than replaced. Repeated executions may therefore add new rows to the existing file.
 
-At this point, the initial local setup and complete local sensing validation are finished.
+At this point, the initial local setup and complete local radio validation are finished.
 
---- 
+---
+
+# Collect a labeled 5G sensing dataset
+
+Every deployment needs its own labelled dataset: one class per scene state to recognise, for example `empty` and one class per target position (`P1`, `P2`, ...). The class name is the `--label` of the session and becomes the folder name under `--output-root`; the training script later discovers the classes from those folder names, so **use exactly the same label spelling in every session** and in the [label map](#map-model-labels-to-objects-and-coordinates).
+
+Main dataset collection script:
+
+```text
+src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py
+```
+
+The script:
+
+1. shows a preparation countdown;
+2. performs CFO warmup;
+3. continuously captures and processes SSB blocks;
+4. accepts valid `dataSSB` and `rxGridSSB` samples;
+5. writes an H5 dataset;
+6. writes human-readable metadata;
+7. writes a CSV capture log.
+
+## Dataset parameter meanings
+
+The most important labeling parameters are:
+
+- `--label`: class assigned to every accepted sample in the session;
+- `--scene`: description of the scene, for example `static`;
+- `--person-id`: identifier for the person, or `none`;
+- `--orientation`: person orientation, for example `front`, `sideways` or `none`;
+- `--prep-sec`: countdown before capture starts;
+- `--duration-sec`: total dataset collection duration;
+- `--output-root`: root directory used to store the dataset.
+
+The radio and 5G processing parameters should match the online inference deployment. In particular, use the same `--force-nid2`: it is stored in the H5 file and used by the training script to determine the cell PCI.
+
+---
+
+## Collect an empty-scene dataset
+
+Make sure no target is present in the sensing area.
+
+Run:
+
+```bash
+python src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py \
+  --label empty \
+  --scene static \
+  --person-id none \
+  --orientation none \
+  --prep-sec 10 \
+  --duration-sec 30 \
+  --serial <serial_id> \
+  --freq 3541.44e6 \
+  --rate 15.36e6 \
+  --gain 60 \
+  --duration-ms 20 \
+  --channel 0 \
+  --antenna RX2 \
+  --force-nid2 0 \
+  --enable-cfo-correction \
+  --cfo-warmup-iters 30 \
+  --cfo-correction-sign -1 \
+  --output-root data/python_ssb_datasets
+```
+
+During the preparation countdown, leave the monitored area empty.
+
+---
+
+## Collect a target-position dataset
+
+Place the target at the desired position during the preparation countdown.
+
+Example for position `P1`:
+
+```bash
+python src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py \
+  --label P1 \
+  --scene static \
+  --person-id person_1 \
+  --orientation sideways \
+  --prep-sec 10 \
+  --duration-sec 30 \
+  --serial <serial_id> \
+  --freq 3541.44e6 \
+  --rate 15.36e6 \
+  --gain 60 \
+  --duration-ms 20 \
+  --channel 0 \
+  --antenna RX2 \
+  --force-nid2 0 \
+  --enable-cfo-correction \
+  --cfo-warmup-iters 30 \
+  --cfo-correction-sign -1 \
+  --output-root data/python_ssb_datasets
+```
+
+To collect another position, replace:
+
+```text
+--label P1
+```
+
+with the desired class, for example:
+
+```text
+--label P2
+```
+
+Also record meaningful metadata:
+
+```text
+--person-id person_1
+--orientation front
+```
+
+Use the same class naming convention consistently across all sessions.
+
+---
+
+## Dataset output structure
+
+Each collection session creates:
+
+```text
+data/python_ssb_datasets/<label>/<session_id>/
+```
+
+Example:
+
+```text
+data/python_ssb_datasets/P1/session_<timestamp>_P1_static/
+```
+
+Each session contains:
+
+```text
+session_data.h5
+metadata.json
+capture_log.csv
+```
+
+### `session_data.h5`
+
+Contains accepted valid samples.
+
+Important arrays include:
+
+```text
+dataSSB          complex64, shape [360, 6, N]
+rxGridSSB        complex64, shape [240, 4, N]
+pss_metric       float32, shape [N]
+timing_offset_samples
+timing_offset_ms
+capture_time_ms
+pss_time_ms
+ofdm_time_ms
+dsp_time_ms
+loop_time_ms
+```
+
+`N` is the number of accepted valid samples.
+
+Important H5 attributes include:
+
+```text
+label
+scene
+person_id
+orientation
+session_id
+serial
+freq
+rate
+gain
+cfo_hz_applied
+```
+
+### `metadata.json`
+
+Contains human-readable information about the complete capture session.
+
+Inspect it with:
+
+```bash
+python -m json.tool \
+  data/python_ssb_datasets/<label>/<session_id>/metadata.json
+```
+
+### `capture_log.csv`
+
+Contains one row for every attempted capture, including valid and invalid attempts.
+
+Inspect it with:
+
+```bash
+cat data/python_ssb_datasets/<label>/<session_id>/capture_log.csv
+```
+
+---
+
+# Analyze a collected dataset
+
+Find the most recent H5 dataset:
+
+```bash
+LAST_H5="$(find data/python_ssb_datasets -name session_data.h5 | sort | tail -n 1)"
+echo "$LAST_H5"
+```
+
+Analyze it:
+
+```bash
+python src/python/ssb_python/analyze_rxgrid_distributions.py \
+  --input "$LAST_H5" \
+  --dataset rxGridSSB \
+  --label python_dataset
+```
+
+The analysis can generate plots such as:
+
+```text
+amplitude histogram
+phase histogram
+IQ scatter
+mean amplitude heatmap
+mean amplitude by subcarrier
+mean amplitude by OFDM symbol
+```
+
+Use these plots to inspect whether:
+
+- the dataset contains valid signal structure;
+- amplitudes remain stable;
+- phases behave consistently;
+- some subcarriers or symbols look corrupted;
+- different sessions appear reasonably comparable.
+
+These plots do not by themselves prove that two classes are separable. They are diagnostic tools for identifying capture or preprocessing problems.
+
+---
+
+## Analyze and train the Fisher SSB sensing model
+
+`src/python/run_ssb_sensing_analysis.py` is the offline analysis and training tool for a labelled collection of SSB sessions. It **automatically discovers the class names from the immediate subdirectories below `--data-root`**: every folder that contains at least one `session_data.h5` becomes a label. There is no fixed list of labels in the script, and any number of labels ≥ 2 is supported.
+
+The expected local dataset layout is the one produced by the [collection script](#collect-a-labeled-5g-sensing-dataset):
+
+```text
+<data-root>/
+  empty/
+    session_<timestamp>_empty_static/
+      session_data.h5
+  P1/
+    session_<timestamp>_P1_static/
+      session_data.h5
+  P2/
+    session_<timestamp>_P2_static/
+      session_data.h5
+```
+
+The directory is collected locally and is intentionally not included in Git. After activating the project virtual environment and installing `requirements.txt`, run:
+
+```bash
+python src/python/run_ssb_sensing_analysis.py \
+  --data-root data/python_ssb_datasets \
+  --output results/ssb_sensing_analysis
+```
+
+For a dataset stored elsewhere, pass its absolute path instead:
+
+```bash
+python src/python/run_ssb_sensing_analysis.py \
+  --data-root /path/to/python_ssb_datasets \
+  --output results/ssb_sensing_analysis
+```
+
+Optional arguments:
+
+```text
+--top-k N            number of Fisher-selected resource elements (default: 64)
+--random-traces N    random channel-magnitude traces plotted per class (default: 10)
+--seed N             reproducible random seed (default: 42)
+```
+
+### What the script does
+
+1. Loads `rxGridSSB [240, 4, N]` from every session.
+2. Detects the cell's PCI (NID1 from SSS correlation, NID2 from the H5 attribute `force_nid2`) and the `i_bar_SSB` (PBCH DM-RS correlation) of every session, and reports the agreement between snapshots.
+3. Estimates the channel `H` from SSS and PBCH DM-RS and computes `20·log10|H|` normalised by its own snapshot mean, which removes slow global gain changes.
+4. Plots random snapshots, mean profiles, the temporal channel level and an exploratory PCA.
+5. Splits the time-ordered samples of every class 60% / 20% / 20% (train / validation / test).
+6. Ranks every resource element with a multi-class Fisher score **fitted on the training portion only** and keeps the top `--top-k`.
+7. Builds the feature vector: the selected REs + 9 spectral features (low/mid/high band means and standard deviations and the band differences).
+8. Trains `StandardScaler + LogisticRegression(class_weight="balanced")`, reports validation metrics, retrains on train + validation and reports the final test metrics and confusion matrix.
+9. Exports the deployment artifacts.
+
+### Outputs
+
+Written below `--output`:
+
+```text
+01_random_H_magnitude_snapshots.pdf
+02_mean_H_magnitude_profile.pdf
+03_normalized_H_profile.pdf
+04_global_H_level_temporal.pdf
+05_fisher_RE_heatmap.pdf
+06_PCA_normalized_H_magnitude.pdf
+07_confusion_matrix.pdf
+selected_resource_elements.csv
+classification_report.txt
+confusion_matrix.csv
+detection_summary.json
+metrics.json
+model_fisher_logreg.joblib
+model_fisher_logreg.pt
+```
+
+The two deployment artifacts are:
+
+- `model_fisher_logreg.joblib`: the original scikit-learn pipeline, for offline evaluation;
+- `model_fisher_logreg.pt`: the PyTorch checkpoint used online. The scaler is folded into a single linear layer, so its probabilities are identical to the scikit-learn pipeline (verified by the [tests](#tests)). It also stores the class names, the selected REs, the feature definition and the radio configuration (PCI, i_bar_SSB) of the training data.
+
+If sessions were recorded with different PCI or i_bar_SSB values, the script warns and stores the most frequent pair; online grids with another i_bar_SSB are then rejected.
+
+The default evaluation splits the time-ordered samples of every class into 60% training, 20% validation and 20% test. This is useful as an initial within-session baseline, but samples from the same acquisition may still occur in different splits. Do not interpret its final-test metrics as performance on an independent experiment. For a deployment claim, reserve entire sessions or collection days for testing.
+
+---
+
+# Test a model checkpoint on a saved dataset
+
+Find the latest dataset:
+
+```bash
+LAST_H5="$(find data/python_ssb_datasets -name session_data.h5 | sort | tail -n 1)"
+```
+
+Replay the trained model on up to 30 saved samples, with exactly the online inference path (radio check + features + PyTorch model):
+
+```bash
+python src/python/ssb_python/replay_fisher_checkpoint_on_h5.py \
+  --model-pt results/ssb_sensing_analysis/model_fisher_logreg.pt \
+  --input-h5 "$LAST_H5" \
+  --max-samples 30
+```
+
+Use `--max-samples 0` to replay every sample and `--quiet` to print only the summary.
+
+This verifies that:
+
+- the H5 dataset can be opened;
+- `rxGridSSB` can be read;
+- the checkpoint can be loaded;
+- the session has the PCI/i_bar_SSB the model expects (otherwise samples are reported as rejected);
+- predictions can be produced for saved samples, with per-class mean probabilities.
+
+A successful technical test does not guarantee that the model is appropriate for the new environment.
+
+---
+
+# Model checkpoint format
+
+`model_fisher_logreg.pt` is a `torch.save` dictionary:
+
+| Key | Content |
+|---|---|
+| `model_type` | `torch_fisher_logreg` |
+| `model_name` | `ssb_fisher_logreg` |
+| `model_state_dict` | weights of one `nn.Linear(n_features, n_classes)` |
+| `classes` | class names, in output order (the dataset folder names) |
+| `selected_resource_elements` | `[[subcarrier, symbol], ...]` Fisher-selected REs |
+| `feature_spec` | description of the feature vector |
+| `radio_configuration` | `{"pci": ..., "ibar": ...}` used to build the reference grid |
+
+The online frontend (`ssb_fisher_torch_inference.py`) reconstructs `H` and the features from each received `rxGridSSB` with the same functions the trainer uses.
+
+## Radio check (PCI and i_bar_SSB)
+
+The channel estimate divides the received grid by the reference SSS and PBCH DM-RS of the training PCI and i_bar_SSB. If the receiver locks onto a different SSB (another beam, so another i_bar_SSB), the reference is wrong and `|H|` is distorted by several dB, which is of the same order as the differences between classes. Before every inference the online pipeline therefore:
+
+1. checks that the NID2 used by the PSS search equals `PCI mod 3` of the model. With `--force-nid2` this is the configured value, so this step validates the configuration, not the signal;
+2. correlates the SSS of the grid against the 336 NID1 candidates and checks that the detected PCI is the model's (rejects another cell and noise grids);
+3. correlates the PBCH DM-RS against the 8 possible i_bar_SSB values and checks that the best one is the model's (rejects another SSB beam).
+
+If any check fails, the iteration is marked invalid (`err=nid2_mismatch: ...`, `err=pci_mismatch: ...` or `err=ibar_mismatch: ...`) and nothing is published as a detection. `--fisher-pci` and `--fisher-ibar` override the checkpoint values when the transmitter configuration has deliberately changed.
+
+---
+
+# Map model labels to objects and coordinates
+
+The model predicts a **label** (a dataset folder name such as `empty` or `P1`). The Digital Twin needs **objects with coordinates**. The translation is done by:
+
+```text
+config/sensing_label_map.json
+```
+
+so coordinates can be changed at any time without retraining or editing code. The file in the repository is a generic template with placeholder labels and coordinates; replace them with the labels of your dataset and the real positions once the Digital Twin layout is fixed.
+
+```json
+{
+  "schema_version": "sensing_label_map_v1",
+  "frame_id": "world",
+  "units": "m",
+  "default_object_type": "person",
+  "labels": {
+    "empty": [],
+    "P1": [
+      {"object_type": "person", "position": {"x": 1.0, "y": 2.0, "z": 0.0}, "yaw_deg": 0.0}
+    ],
+    "P2": {"position": {"x": 3.0, "y": 2.0}}
+  }
+}
+```
+
+Rules:
+
+- every label of the model must appear in the map; the online pipeline refuses to start otherwise, so nothing is ever published at an invented position;
+- `[]` means "no object" for that label (for example `empty`);
+- a label may contain several objects (a list), or a single object written as a dict;
+- `z` and `yaw_deg` default to 0; `object_type` defaults to `default_object_type`;
+- positions are in metres in the frame `frame_id` (right-handed, Z up), angles in degrees.
+
+Before using the map in a scene, verify the scene origin, the X/Y/Z axis directions, units, floor height and object orientation used by the Digital Twin.
+
+Check a map against a trained model:
+
+```bash
+cd src/python
+python -m sensing_api.label_map ../../config/sensing_label_map.json \
+  --model ../../results/ssb_sensing_analysis/model_fisher_logreg.pt
+```
+
+```text
+../../config/sensing_label_map.json: frame=world units=m
+  empty: no objects
+  P1: person@(1,2,0)
+  P2: person@(3,2,0)
+OK: every class of ../../results/ssb_sensing_analysis/model_fisher_logreg.pt is mapped ['P1', 'P2', 'empty']
+```
+
+---
+
+# Sensing API and CAPIF
+
+Results are published through a REST API instead of copying files to another computer. The API follows the CAPIF model (3GPP TS 29.222 / ETSI TS 123 222), adapted from the PRIME-6G Digital Twin implementation:
+
+| Process | Default port | CAPIF role | Module |
+|---|---:|---|---|
+| CAPIF Core Function | 8080 | CCF: provider/invoker enrolment, publication, discovery, routing | `sensing_api.capif_core` |
+| Sensing API | 8090 | API Exposing Function (AEF) for `sensing-api` | `sensing_api.server` |
+| Online pipeline | — | producer of reports | `online_5g_ssb_sensing.py` |
+| Consumers | — | API invokers | e.g. `sensing_api.consume` |
+
+On startup the Sensing API enrols as an API provider in the CCF and publishes its `ServiceAPIDescription` as `sensing-api`. If the CCF is not running yet it keeps retrying every 5 s. Consumers enrol as invokers, discover `sensing-api` and obtain its address from the routing information; they never need a hard-coded host.
+
+## Configuration
+
+`config/sensing_api_config.json`:
+
+```json
+{
+  "capif": {"host": "0.0.0.0", "port": 8080, "base_url": "http://127.0.0.1:8080/capif/v1"},
+  "sensing_api": {"host": "0.0.0.0", "port": 8090, "advertised_host": "127.0.0.1",
+                  "history_size": 1000, "register_with_capif": true}
+}
+```
+
+- `capif.base_url`: where the Sensing API and consumers reach the CCF.
+- `sensing_api.host` / `port`: bind address of the Sensing API.
+- `sensing_api.advertised_host`: the address published in CAPIF. **Set it to the IP that consumers can reach** (not `0.0.0.0` or `127.0.0.1` when consumers run on other machines).
+- `history_size`: number of reports kept in memory for `GET /reports`.
+
+Environment variables override the file: `SENSING_CAPIF_URL`, `SENSING_API_HOST`, `SENSING_API_PORT`, `SENSING_API_ADVERTISED_HOST`, `SENSING_API_PRODUCER_TOKEN`, and `SENSING_API_CONFIG` (path of another config file).
+
+## Start the services
+
+In two terminals, from `src/python` with the virtual environment active:
+
+```bash
+cd src/python
+python -m sensing_api.capif_core
+```
+
+```bash
+cd src/python
+SENSING_API_ADVERTISED_HOST=<ip_of_this_computer> python -m sensing_api.server
+```
+
+Check them:
+
+```bash
+curl -s http://127.0.0.1:8080/capif/v1/health
+curl -s http://127.0.0.1:8090/sensing/v1/health
+```
+
+The Sensing API health must show `"capif_registered": true`. Interactive documentation:
+
+```text
+CAPIF CCF     http://<host>:8080/capif/v1/ui
+Sensing API   http://<host>:8090/sensing/v1/ui
+```
+
+If a CAPIF Core Function already runs elsewhere, skip the first command and point `SENSING_CAPIF_URL` to it.
+
+## Data contract
+
+Conventions: JSON, UTF-8, snake_case, metres, degrees, RFC 3339 UTC timestamps.
+
+A **report** is published by a producer once per inference:
+
+```json
+{
+  "sensor": {
+    "sensor_id": "5g-ssb-rx-01",
+    "sensor_type": "5g_ssb",
+    "technology": "5G-NR",
+    "method": "passive_ssb_fingerprinting",
+    "model_name": "ssb_fisher_logreg",
+    "model_version": "model_fisher_logreg.pt",
+    "metadata": {"center_frequency_hz": 3541440000.0, "sample_rate_sps": 15360000.0, "pci": 302, "ibar": 0}
+  },
+  "timestamp": "2026-10-26T10:15:30.123456+00:00",
+  "sequence": 1532,
+  "valid": true,
+  "invalid_reason": null,
+  "label": "P1",
+  "confidence": 0.93,
+  "probabilities": {"P1": 0.93, "P2": 0.05, "empty": 0.02},
+  "detections": [
+    {
+      "object_id": "person_0",
+      "object_type": "person",
+      "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+      "yaw_deg": 0.0,
+      "frame_id": "world",
+      "confidence": 0.93,
+      "label": "P1"
+    }
+  ],
+  "extra": {"dsp": {"nid2": 0, "pss_metric": 0.91}, "cfo_hz": 1250.4}
+}
+```
+
+- Invalid iterations (weak PSS, incomplete grid, radio-check failure) are published with `"valid": false`, the reason in `invalid_reason` and no detections, so consumers know the sensor is alive but has no trustworthy state.
+- An empty-scene label is published as a valid report with `"detections": []`.
+- `object_id` is stable per object type (`person_0`, `person_1`, ...), so a consumer moves the same object when the predicted position changes.
+- `confidence` of a detection is the model probability of the predicted label.
+
+## Endpoints
+
+| Method | Resource | Meaning |
+|---|---|---|
+| POST | `/sensing/v1/reports` | Publish a report (producers) |
+| GET | `/sensing/v1/detections` | Current detections of every sensor. Filters: `object_type`, `sensor_id`, `min_confidence`, `max_age_s` |
+| GET | `/sensing/v1/reports` | Report history. Filters: `sensor_id`, `since`, `limit` |
+| GET | `/sensing/v1/sensors` | Sensors that have published, with last report time and validity |
+| GET | `/sensing/v1/sensors/{sensor_id}/latest` | Latest full report of one sensor |
+| GET | `/sensing/v1/stream` | Server-Sent Events: one `report` event per published report |
+| GET | `/sensing/v1/health` | Status and CAPIF registration |
+
+`/detections` uses only the **latest** report of each sensor: if it is invalid or empty, that sensor contributes no objects (the previous state is not repeated, because it may be outdated). Use `max_age_s` to ignore sensors that stopped publishing.
+
+## Security
+
+The CAPIF descriptions declare `PKI` as interface metadata, as in the PRIME-6G implementation, but the processes do not enforce certificates. Optionally, set `SENSING_API_PRODUCER_TOKEN` on the server and the same variable (or `--api-token`) on the producer: `POST /reports` then requires `Authorization: Bearer <token>`; reads stay open. For deployments outside a trusted lab network, put both services behind TLS and real authorisation.
+
+---
+
+# Run online 5G SSB sensing
+
+With the model trained, the label map completed and the services running:
+
+```bash
+python src/python/ssb_python/online_5g_ssb_sensing.py \
+  --serial <serial_id> \
+  --freq 3541.44e6 \
+  --rate 15.36e6 \
+  --gain 60 \
+  --duration-ms 20 \
+  --channel 0 \
+  --antenna RX2 \
+  --force-nid2 0 \
+  --enable-cfo-correction \
+  --cfo-warmup-iters 30 \
+  --cfo-correction-sign -1 \
+  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
+  --label-map config/sensing_label_map.json \
+  --sensor-id 5g-ssb-rx-01 \
+  --capif-url http://<capif_host>:8080/capif/v1 \
+  --progress-every 1
+```
+
+The radio and 5G processing parameters must be the same ones used to collect the training dataset.
+
+Model, publication and output parameters:
+
+- `--fisher-model`: checkpoint from `run_ssb_sensing_analysis.py` (default `results/ssb_sensing_analysis/model_fisher_logreg.pt`).
+- `--fisher-pci`, `--fisher-ibar`: override the checkpoint radio configuration.
+- `--torch-device cpu`: inference device.
+- `--label-map`: label → objects and coordinates.
+- `--sensor-id`: unique id of this receiver in the Sensing API.
+- `--capif-url`: discover the Sensing API through CAPIF; or `--sensing-api-url http://<host>:8090` to call it directly.
+- `--publish-every N`: publish one report every N iterations (default 1).
+- `--api-token`: producer token, when the server requires one.
+- `--disable-api`: run without publishing.
+- `--local-json`, `--json-every`, `--log-csv`: local latest-state JSON and CSV log.
+- `--enable-mitsuba-export`, `--mitsuba-output`, `--mitsuba-every`: optional local Mitsuba XML.
+- `--min-pss-metric`: minimum PSS metric for a valid block (default 0.5).
+- `--num-iters 0`: run forever (default); stop with `Ctrl+C`.
+
+At startup the script prints the model classes and the radio configuration, and warns if `--force-nid2` does not match the model's PCI:
+
+```text
+=== Online 5G SSB sensing ===
+Fisher model:       results/ssb_sensing_analysis/model_fisher_logreg.pt
+classes:            ['P1', 'P2', 'empty']
+radio config:       PCI=<pci> i_bar=<ibar> (NID2 must be <pci mod 3>)
+label map:          config/sensing_label_map.json (frame=world)
+sensor id:          5g-ssb-rx-01
+Sensing API:        CAPIF http://<capif_host>:8080/capif/v1
+```
+
+Each iteration then prints, for example:
+
+```text
+[000153] valid=1 label=P1 conf=0.934 objs=1 rx_mean=31.204 pss=0.912 loop=48.70 ms api=153/0 err=
+```
+
+Publishing runs in a background thread that keeps only the newest pending report: if the API is slow or unreachable, the sensing loop does not wait and old states are dropped rather than queued. Delivery failures are counted in `api=<sent>/<failed>` and in the CSV, and a summary is printed at exit.
+
+---
+
+# Consume the Sensing API
+
+## Discover through CAPIF
+
+```bash
+# 1. enrol as invoker
+curl -s -X POST http://<capif_host>:8080/capif/v1/api-invoker-enrolments \
+  -H "Content-Type: application/json" \
+  -d '{"onboardingInformation": {"apiInvokerPublicKey": "my-app"}, "apiList": ["sensing-api"]}'
+
+# 2. discover the API and note its apiId
+curl -s "http://<capif_host>:8080/capif/v1/service-apis?api_name=sensing-api"
+
+# 3. where to call it (ipv4Addr + port of the AEF)
+curl -s http://<capif_host>:8080/capif/v1/routing-info/<apiId>
+```
+
+## Read detections
+
+```bash
+curl -s "http://<sensing_host>:8090/sensing/v1/detections?object_type=person&max_age_s=2"
+```
+
+```json
+{
+  "detections": [
+    {
+      "object_id": "person_0",
+      "object_type": "person",
+      "position": {"x": 1.0, "y": 2.0, "z": 0.0},
+      "yaw_deg": 0.0,
+      "frame_id": "world",
+      "confidence": 0.93,
+      "label": "P1",
+      "sensor_id": "5g-ssb-rx-01",
+      "sensor_type": "5g_ssb",
+      "technology": "5G-NR",
+      "model_name": "ssb_fisher_logreg",
+      "timestamp": "2026-10-26T10:15:30.123456+00:00",
+      "report_id": "4f0c..."
+    }
+  ],
+  "count": 1,
+  "generated_at": "2026-10-26T10:15:30.140000+00:00"
+}
+```
+
+Other reads:
+
+```bash
+curl -s http://<sensing_host>:8090/sensing/v1/sensors
+curl -s http://<sensing_host>:8090/sensing/v1/sensors/5g-ssb-rx-01/latest
+curl -s "http://<sensing_host>:8090/sensing/v1/reports?sensor_id=5g-ssb-rx-01&limit=20"
+curl -N http://<sensing_host>:8090/sensing/v1/stream        # live events, Ctrl+C to stop
+```
+
+## Python consumer
+
+`sensing_api.consume` does the complete invoker flow (enrol → discover → routing) and then polls or streams:
+
+```bash
+cd src/python
+
+# read the current detections once
+python -m sensing_api.consume --capif-url http://<capif_host>:8080/capif/v1 --once
+
+# follow the live stream and keep a Mitsuba scene up to date
+python -m sensing_api.consume --capif-url http://<capif_host>:8080/capif/v1 --stream \
+  --mitsuba-xml /path/to/live_person_sionna_scene.xml
+
+# poll twice per second and keep the latest detections as JSON
+python -m sensing_api.consume --api-url http://<sensing_host>:8090 --poll-interval 0.5 \
+  --object-type person --json-out /path/to/latest_detections.json
+```
+
+In `--stream` mode the consumer keeps the latest detections of every sensor and writes the merged set on each event (sensors silent for longer than `--max-age-s` are dropped). Mitsuba shape ids include the sensor id, so several sensors can report `person_0` at the same time.
+
+Minimal code for another application:
+
+```python
+import httpx
+from sensing_api.capif_client import CapifInvoker
+
+with CapifInvoker("http://<capif_host>:8080/capif/v1") as capif:
+    capif.enrol("my-digital-twin")
+    base_url = capif.resolve_base_url("sensing-api")
+
+for det in httpx.get(f"{base_url}/sensing/v1/detections", params={"max_age_s": 2}).json()["detections"]:
+    print(det["object_type"], det["position"], det["confidence"], det["sensor_id"])
+```
+
+---
+
+# Mitsuba/Sionna XML export
+
+The Sensing API publishes object types and coordinates; converting them to a scene description is a consumer decision. The repository provides one converter, `sensing_api/mitsuba.py`, usable in two places:
+
+- by a consumer: `python -m sensing_api.consume ... --mitsuba-xml <path>` (recommended: the XML is produced where Sionna runs);
+- locally by the online pipeline: `--enable-mitsuba-export` (default output `results/online/live_person_sionna_scene.xml`, next to `--local-json`).
+
+Each detected `person` becomes a body ellipsoid and a head sphere sharing the BSDF id `human_body_standard`. Plain Mitsuba BSDFs cannot encode radio conductivity, so the radio material is written as an XML comment that the Sionna side maps to a `RadioMaterial`:
+
+```text
+SIONNA_RADIO_MATERIAL name=human_body_standard relative_permittivity=38 relative_permeability=1 conductivity_s_per_m=1.46 frequency_hz=3541440000
+```
+
+Geometry and material can be changed in the online pipeline with `--mitsuba-body-radius-x-m`, `--mitsuba-body-radius-y-m`, `--mitsuba-body-half-height-m`, `--mitsuba-body-center-z-m`, `--mitsuba-head-radius-m`, `--mitsuba-head-center-z-m`, `--mitsuba-human-material-name`, `--mitsuba-human-epsilon-r`, `--mitsuba-human-mu-r` and `--mitsuba-human-conductivity-s-per-m`. An empty scene (no person, or an invalid iteration) is exported without shapes.
+
+The shape transforms are written as scale → rotate → translate, so the person is centred on the published coordinates; this is checked by loading the XML with Mitsuba in the tests. Mitsuba warns that its analytic `sphere` does not officially support non-uniform scaling (the body ellipsoid); if Sionna needs an exact ellipsoid, replace the body with a mesh.
+
+Generate a scene locally without any remote machine:
+
+```bash
+python src/python/ssb_python/online_5g_ssb_sensing.py \
+  --serial <serial_id> \
+  --freq 3541.44e6 \
+  --rate 15.36e6 \
+  --gain 60 \
+  --duration-ms 20 \
+  --num-iters 30 \
+  --warmup-iters 5 \
+  --channel 0 \
+  --antenna RX2 \
+  --force-nid2 0 \
+  --enable-cfo-correction \
+  --cfo-warmup-iters 30 \
+  --cfo-correction-sign -1 \
+  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
+  --label-map config/sensing_label_map.json \
+  --disable-api \
+  --enable-mitsuba-export \
+  --progress-every 1
+```
+
+```bash
+cat results/online/live_person_sionna_scene.xml
+```
+
+---
+
+# Recommended workflow for a new deployment
+
+For a new room, factory or antenna arrangement:
+
+1. Install the repository and UHD environment.
+2. Connect the USRP B210 and verify UHD communication.
+3. Determine the correct frequency, sample rate, gain, channel, antenna and NID2 ([Automatic SSB Discovery](#automatic-ssb-discovery) helps).
+4. Validate the radio chain with `online_5g_ssb_sensing.py --dsp-only` (Step 10).
+5. Define the target classes, for example `empty`, `P1`, `P2`, `P3`.
+6. Collect several labeled sessions for every class.
+7. Inspect the datasets for capture and preprocessing problems.
+8. Run `run_ssb_sensing_analysis.py` to analyse the signal and train the model.
+9. Replay-test `model_fisher_logreg.pt` on saved H5 data, ideally on sessions not used for training.
+10. Add every class with its objects and coordinates to `config/sensing_label_map.json` and check it against the model.
+11. Start the CAPIF Core Function and the Sensing API with the correct `advertised_host`.
+12. Run online inference publishing to the Sensing API.
+13. Validate what the Digital Twin consumer reads from `/sensing/v1/detections` or `/sensing/v1/stream`.
+
+---
+
 # WiFi CSI receiver files and recommended execution
 
 The WiFi CSI component currently contains two receiver scripts:
@@ -1114,1350 +1862,6 @@ Raw L-LTF extraction would require an additional capture path around the
 
 ---
 
-# Connect the sensing pipeline to a remote Digital Twin machine
-
-The next objective is to send the generated inference JSON to the computer that will consume the sensing result.
-
-The destination configured in the sensing command must be the same JSON path read by the external consumer:
-
-```text
-Sensing machine:
---remote-target <remote_user>@<remote_host>:<remote_json_path>
-
-Remote consumer:
-read JSON from <remote_json_path>
-```
-
-The two paths must refer to the same file.
-
-## Step 11 — Verify SSH connectivity
-
-Before testing the complete sensing pipeline, verify that the sensing computer can connect to the destination computer through SSH.
-
-Run:
-
-```bash
-ssh <remote_user>@<remote_host>
-```
-
-The first connection may display:
-
-```text
-Are you sure you want to continue connecting (yes/no/[fingerprint])?
-```
-
-Check that the displayed fingerprint corresponds to the destination computer and then enter:
-
-```text
-yes
-```
-
-SSH may then request the password of `<remote_user>`.
-
-If the connection succeeds, exit the remote session:
-
-```bash
-exit
-```
-
-If the connection returns:
-
-```text
-Connection refused
-```
-
-the SSH server may not be installed or active on the destination computer.
-
-On the destination computer, install and enable it:
-
-```bash
-sudo apt update
-sudo apt install -y openssh-server
-sudo systemctl enable --now ssh
-```
-
-Check its status:
-
-```bash
-sudo systemctl status ssh
-```
-
-The service should appear as:
-
-```text
-active (running)
-```
-
----
-
-## Step 12 — Configure passwordless SSH authentication
-
-The sensing pipeline must transfer the JSON automatically. It cannot stop during every iteration to request the remote user password.
-
-SSH key authentication must therefore be configured before running the pipeline with SCP enabled.
-
-### 12.1 Check whether an SSH key already exists
-
-On the sensing computer, run:
-
-```bash
-ls -la ~/.ssh
-```
-
-Look for a key pair such as:
-
-```text
-id_ed25519
-id_ed25519.pub
-```
-
-The file without `.pub` is the private key and must never be shared.
-
-The `.pub` file is the public key and can be copied to the destination computer.
-
-### 12.2 Create an SSH key if necessary
-
-If no suitable key exists, generate one:
-
-```bash
-ssh-keygen -t ed25519
-```
-
-When prompted for the key location, press Enter to use the default path:
-
-```text
-~/.ssh/id_ed25519
-```
-
-For fully automatic SCP execution, leave the passphrase empty by pressing Enter when prompted.
-
-A key without a passphrase permits unattended execution. The private key must therefore be protected with appropriate file permissions and must not be copied or shared.
-
-The generated files are:
-
-```text
-~/.ssh/id_ed25519
-~/.ssh/id_ed25519.pub
-```
-
-### 12.3 Copy the public key to the destination computer
-
-Run:
-
-```bash
-ssh-copy-id <remote_user>@<remote_host>
-```
-
-The command will request the remote account password one final time.
-
-A successful installation should report that one or more keys were added.
-
-If the machine has several SSH keys and the wrong public key is selected automatically, specify the desired key explicitly:
-
-```bash
-ssh-copy-id -i ~/.ssh/id_ed25519.pub <remote_user>@<remote_host>
-```
-
-If the SSH server uses a non-default port, run:
-
-```bash
-ssh-copy-id -i ~/.ssh/id_ed25519.pub \
-  -p <ssh_port> \
-  <remote_user>@<remote_host>
-```
-
-### 12.4 Verify passwordless SSH access
-
-Run:
-
-```bash
-ssh <remote_user>@<remote_host>
-```
-
-The connection should open without requesting the remote account password.
-
-Exit the session:
-
-```bash
-exit
-```
-
-For a non-interactive verification, run:
-
-```bash
-ssh -o BatchMode=yes <remote_user>@<remote_host> "echo SSH_OK"
-```
-
-Expected output:
-
-```text
-SSH_OK
-```
-
-The option:
-
-```text
--o BatchMode=yes
-```
-
-prevents SSH from requesting a password interactively.
-
-If key authentication is not working, the command will fail immediately instead of waiting for user input.
-
----
-
-## Step 13 — Verify the remote destination directory
-
-The directory that will contain the JSON must already exist on the destination computer.
-
-Create it remotely if necessary:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "mkdir -p <remote_directory>"
-```
-
-Verify that the directory exists and that the remote user can write to it:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "test -d <remote_directory> && test -w <remote_directory> && echo DIRECTORY_OK"
-```
-
-Expected output:
-
-```text
-DIRECTORY_OK
-```
-
-The final destination file will be:
-
-```text
-<remote_directory>/<remote_json_filename>
-```
-
-The generic SCP target format is:
-
-```text
-<remote_user>@<remote_host>:<remote_directory>/<remote_json_filename>
-```
-
----
-
-## Step 14 — Test SCP independently
-
-Before enabling SCP inside the sensing pipeline, test it with a small JSON file.
-
-Create a temporary local JSON:
-
-```bash
-echo '{"scp_test": true}' > /tmp/test_scp.json
-```
-
-Transfer it:
-
-```bash
-scp /tmp/test_scp.json \
-  <remote_user>@<remote_host>:<remote_directory>/<remote_json_filename>
-```
-
-The transfer must complete without requesting a password.
-
-Verify the received file:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "python3 -m json.tool <remote_directory>/<remote_json_filename>"
-```
-
-Expected output:
-
-```json
-{
-    "scp_test": true
-}
-```
-
-This confirms:
-
-```text
-local file
-  → SSH authentication
-  → SCP transfer
-  → remote directory
-  → remote JSON file
-```
-
-If this independent test fails, do not start the sensing pipeline yet. Resolve the SSH, authentication, permission or destination-path problem first.
-
----
-
-## Step 15 — Run the generic 5G sensing pipeline with SCP enabled
-
-Once passwordless SCP works, run the complete sensing pipeline without `--disable-scp`.
-
-Replace:
-
-- `<serial_id>` with the USRP serial number;
-- `<remote_user>` with the destination user;
-- `<remote_host>` with the destination hostname or IP address;
-- `<remote_directory>` with the directory read by the remote consumer;
-- `<remote_json_filename>` with the JSON filename read by the remote consumer.
-
-```bash
-python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
-  --serial <serial_id> \
-  --freq 3541.44e6 \
-  --rate 15.36e6 \
-  --gain 60 \
-  --duration-ms 20 \
-  --num-iters 30 \
-  --warmup-iters 5 \
-  --channel 0 \
-  --antenna RX2 \
-  --force-nid2 0 \
-  --enable-cfo-correction \
-  --cfo-warmup-iters 30 \
-  --cfo-correction-sign -1 \
-  --inference-backend torch-fisher \
-  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
-  --torch-device cpu \
-  --remote-target <remote_user>@<remote_host>:<remote_directory>/<remote_json_filename> \
-  --scp-every 1 \
-  --progress-every 1
-```
-
-### SCP parameters
-
-- `--remote-target` defines the user, computer and complete destination path of the JSON.
-- `--scp-every 1` transfers the JSON after every sensing iteration.
-- `--disable-scp` must not be included when remote transfer is required.
-
-The generic model checkpoint must have been created first by the offline training workflow. The remote target has the following structure:
-
-```text
-<remote_user>@<remote_host>:<remote_json_path>
-```
-
-where:
-
-```text
-<remote_json_path> =
-<remote_directory>/<remote_json_filename>
-```
-
-The remote consumer must read that same file.
-
----
-
-## Step 16 — Verify the online SCP transfer
-
-A successful sensing iteration should contain:
-
-```text
-scp=1
-```
-
-For example:
-
-```text
-[<iteration>] valid=1 label=<label> conf=<confidence> ... scp=1 ... err=
-```
-
-This confirms that:
-
-- the local JSON was generated;
-- the SCP process completed successfully;
-- the remote JSON was updated.
-
-If the output contains:
-
-```text
-scp=0
-```
-
-inspect the value following `err=`.
-
-### Password or interactive authentication problem
-
-Typical result:
-
-```text
-scp=0
-err=scp_timeout
-```
-
-This commonly occurs when SCP is waiting for a password.
-
-Verify passwordless authentication with:
-
-```bash
-ssh -o BatchMode=yes <remote_user>@<remote_host> "echo SSH_OK"
-```
-
-### Incorrect destination directory
-
-Possible error:
-
-```text
-No such file or directory
-```
-
-Create the directory:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "mkdir -p <remote_directory>"
-```
-
-### Insufficient permissions
-
-Possible error:
-
-```text
-Permission denied
-```
-
-Check the directory ownership and permissions on the destination computer:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "ls -ld <remote_directory>"
-```
-
-### Host verification problem
-
-Possible error:
-
-```text
-Host key verification failed
-```
-
-Establish the SSH connection manually first:
-
-```bash
-ssh <remote_user>@<remote_host>
-```
-
-Verify the destination fingerprint before accepting it.
-
----
-
-## Step 17 — Inspect the remote JSON
-
-After the sensing test finishes, inspect the file on the destination computer:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "python3 -m json.tool <remote_directory>/<remote_json_filename>"
-```
-
-For a 30-iteration test, the remote file should normally contain:
-
-```json
-"iteration": 29
-```
-
-It should also contain:
-
-```json
-"valid": true,
-"error": ""
-```
-
-and an inference section describing the model prediction.
-
-The local and remote files can be compared using checksums.
-
-Local checksum:
-
-```bash
-sha256sum results/online/live_inference_state_5G.json
-```
-
-Remote checksum:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "sha256sum <remote_directory>/<remote_json_filename>"
-```
-
-After the final transfer, both checksums should match.
-
----
-
-## Step 18 — Monitor the remote JSON during execution
-
-The destination computer can monitor the JSON while the sensing pipeline is running.
-
-On the destination computer:
-
-```bash
-watch -n 0.5 \
-  python3 -m json.tool <remote_directory>/<remote_json_filename>
-```
-
-The displayed fields should change as new sensing iterations are received.
-
-A future Isaac Sim integration must use the same path:
-
-```text
-<remote_directory>/<remote_json_filename>
-```
-
-to read the current inferred state and update the Digital Twin.
-
----
-
-# Collect a labeled 5G sensing dataset
-
-The included demonstration model only distinguishes:
-
-```text
-empty
-P5
-```
-
-and was trained for the current laboratory setup.
-
-For another deployment, room, antenna location or set of positions, collect a new labeled dataset.
-
-Main dataset collection script:
-
-```text
-src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py
-```
-
-The script:
-
-1. shows a preparation countdown;
-2. performs CFO warmup;
-3. continuously captures and processes SSB blocks;
-4. accepts valid `dataSSB` and `rxGridSSB` samples;
-5. writes an H5 dataset;
-6. writes human-readable metadata;
-7. writes a CSV capture log.
-
-## Dataset parameter meanings
-
-The most important labeling parameters are:
-
-- `--label`: class assigned to every accepted sample in the session;
-- `--scene`: description of the scene, for example `static`;
-- `--person-id`: identifier for the person, or `none`;
-- `--orientation`: person orientation, for example `front`, `sideways` or `none`;
-- `--prep-sec`: countdown before capture starts;
-- `--duration-sec`: total dataset collection duration;
-- `--output-root`: root directory used to store the dataset.
-
-The radio and 5G processing parameters should match the online inference deployment.
-
----
-
-## Collect an empty-scene dataset
-
-Make sure no target is present in the sensing area.
-
-Run:
-
-```bash
-python src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py \
-  --label empty \
-  --scene static \
-  --person-id none \
-  --orientation none \
-  --prep-sec 10 \
-  --duration-sec 30 \
-  --serial <serial_id> \
-  --freq 3541.44e6 \
-  --rate 15.36e6 \
-  --gain 60 \
-  --duration-ms 20 \
-  --channel 0 \
-  --antenna RX2 \
-  --force-nid2 0 \
-  --enable-cfo-correction \
-  --cfo-warmup-iters 30 \
-  --cfo-correction-sign -1 \
-  --output-root data/python_ssb_datasets
-```
-
-During the preparation countdown, leave the monitored area empty.
-
----
-
-## Collect a target-position dataset
-
-Place the target at the desired position during the preparation countdown.
-
-Example for position `P5`:
-
-```bash
-python src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py \
-  --label P5 \
-  --scene static \
-  --person-id person_1 \
-  --orientation sideways \
-  --prep-sec 10 \
-  --duration-sec 30 \
-  --serial <serial_id> \
-  --freq 3541.44e6 \
-  --rate 15.36e6 \
-  --gain 60 \
-  --duration-ms 20 \
-  --channel 0 \
-  --antenna RX2 \
-  --force-nid2 0 \
-  --enable-cfo-correction \
-  --cfo-warmup-iters 30 \
-  --cfo-correction-sign -1 \
-  --output-root data/python_ssb_datasets
-```
-
-To collect another position, replace:
-
-```text
---label P5
-```
-
-with the desired class, for example:
-
-```text
---label P1
-```
-
-Also record meaningful metadata:
-
-```text
---person-id person_1
---orientation front
-```
-
-Use the same class naming convention consistently across all sessions.
-
----
-
-## Dataset output structure
-
-Each collection session creates:
-
-```text
-data/python_ssb_datasets/<label>/<session_id>/
-```
-
-Example:
-
-```text
-data/python_ssb_datasets/P5/session_<timestamp>_P5_static/
-```
-
-Each session contains:
-
-```text
-session_data.h5
-metadata.json
-capture_log.csv
-```
-
-### `session_data.h5`
-
-Contains accepted valid samples.
-
-Important arrays include:
-
-```text
-dataSSB          complex64, shape [360, 6, N]
-rxGridSSB        complex64, shape [240, 4, N]
-pss_metric       float32, shape [N]
-timing_offset_samples
-timing_offset_ms
-capture_time_ms
-pss_time_ms
-ofdm_time_ms
-dsp_time_ms
-loop_time_ms
-```
-
-`N` is the number of accepted valid samples.
-
-Important H5 attributes include:
-
-```text
-label
-scene
-person_id
-orientation
-session_id
-serial
-freq
-rate
-gain
-cfo_hz_applied
-```
-
-### `metadata.json`
-
-Contains human-readable information about the complete capture session.
-
-Inspect it with:
-
-```bash
-python -m json.tool \
-  data/python_ssb_datasets/<label>/<session_id>/metadata.json
-```
-
-### `capture_log.csv`
-
-Contains one row for every attempted capture, including valid and invalid attempts.
-
-Inspect it with:
-
-```bash
-cat data/python_ssb_datasets/<label>/<session_id>/capture_log.csv
-```
-
----
-
-# Analyze a collected dataset
-
-Find the most recent H5 dataset:
-
-```bash
-LAST_H5="$(find data/python_ssb_datasets -name session_data.h5 | sort | tail -n 1)"
-echo "$LAST_H5"
-```
-
-Analyze it:
-
-```bash
-python src/python/ssb_python/analyze_rxgrid_distributions.py \
-  --input "$LAST_H5" \
-  --dataset rxGridSSB \
-  --label python_dataset
-```
-
-The analysis can generate plots such as:
-
-```text
-amplitude histogram
-phase histogram
-IQ scatter
-mean amplitude heatmap
-mean amplitude by subcarrier
-mean amplitude by OFDM symbol
-```
-
-Use these plots to inspect whether:
-
-- the dataset contains valid signal structure;
-- amplitudes remain stable;
-- phases behave consistently;
-- some subcarriers or symbols look corrupted;
-- different sessions appear reasonably comparable.
-
-These plots do not by themselves prove that two classes are separable. They are diagnostic tools for identifying capture or preprocessing problems.
-
----
-
-## Analyze and train a generic SSB sensing classifier
-
-`src/python/run_ssb_sensing_analysis.py` is an offline analysis and baseline-classification tool for a labelled collection of SSB sessions. It automatically discovers the available class names from the immediate subdirectories below `--data-root`; there is no fixed list of labels in the script.
-
-The expected local dataset layout is:
-
-```text
-<data-root>/
-  empty/
-    session_<timestamp>_empty_static/
-      session_data.h5
-  P1/
-    session_<timestamp>_P1_static/
-      session_data.h5
-  P2/
-    session_<timestamp>_P2_static/
-      session_data.h5
-```
-
-The directory is collected locally and is intentionally not included in Git. After activating the project virtual environment and installing `requirements.txt`, run:
-
-```bash
-python src/python/run_ssb_sensing_analysis.py \
-  --data-root data/python_ssb_datasets \
-  --output results/ssb_sensing_analysis
-```
-
-For a dataset stored elsewhere, pass its absolute path instead:
-
-```bash
-python src/python/run_ssb_sensing_analysis.py \
-  --data-root /path/to/python_ssb_datasets \
-  --output results/ssb_sensing_analysis
-```
-
-The script estimates an SSB channel response from the SSS and PBCH DM-RS, produces diagnostic channel plots, selects resource elements using a multi-class Fisher score fitted on the training portion only, and trains a balanced logistic-regression baseline. It writes figures, selected REs, detection metadata, a classification report, metrics and a confusion matrix below `--output`.
-
-It also saves two deployment artifacts:
-
-```text
-model_fisher_logreg.joblib
-model_fisher_logreg.pt
-```
-
-The Joblib file preserves the original scikit-learn pipeline for offline evaluation. The `.pt` file is an equivalent PyTorch checkpoint for the online sensing pipeline; it includes the class names, selected REs, channel-feature definition and the dominant PCI/i_bar configuration observed during training.
-
-Optional arguments:
-
-```text
---top-k N            number of Fisher-selected resource elements (default: 64)
---random-traces N    random channel-magnitude traces plotted per class (default: 10)
---seed N             reproducible random seed (default: 42)
-```
-
-The default evaluation splits the time-ordered samples of every class into 60% training, 20% validation and 20% test. This is useful as an initial within-session baseline, but samples from the same acquisition may still occur in different splits. Do not interpret its final-test metrics as performance on an independent experiment. For a deployment claim, reserve entire sessions or collection days for testing.
-
----
-
-# Test a model checkpoint on a saved dataset
-
-Find the latest dataset:
-
-```bash
-LAST_H5="$(find data/python_ssb_datasets -name session_data.h5 | sort | tail -n 1)"
-```
-
-After training the generic model, replay it on up to 30 saved samples:
-
-```bash
-python src/python/ssb_python/test_rxgrid_torch_checkpoint_on_h5.py \
-  --model-pt results/ssb_sensing_analysis/model_fisher_logreg.pt \
-  --input-h5 "$LAST_H5" \
-  --max-samples 30
-```
-
-This verifies that:
-
-- the H5 dataset can be opened;
-- `rxGridSSB` can be read;
-- the checkpoint can be loaded;
-- the model accepts the expected input shape;
-- predictions can be produced for saved samples.
-
-A successful technical test does not guarantee that the model is appropriate for the new environment.
-
----
-
-# Model checkpoint formats
-
-Two PyTorch checkpoint formats are supported:
-
-- The historical CNN checkpoint, selected by `--inference-backend torch`, is used only for compatibility and hardware checks.
-- The generic Fisher checkpoint, selected by `--inference-backend torch-fisher`, is the deployment artifact produced by the offline trainer.
-
-The generic checkpoint contains the PyTorch linear model, its label list, the selected resource elements, the spectral-feature definition, the empty-scene labels and the radio configuration. The online frontend reconstructs `H` and the features from each received `rxGridSSB` before inference.
-
-## Deploy the generic Fisher SSB model online
-
-The generic Fisher model produced by `run_ssb_sensing_analysis.py` can be used by the same online pipeline that creates the state JSON, Mitsuba XML and optional SCP transfer. Select the `torch-fisher` backend and pass the generated PyTorch artifact:
-
-```bash
-python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
-  --inference-backend torch-fisher \
-  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
-  --enable-mitsuba-export \
-  --mitsuba-position-map-json config/sionna_mitsuba_position_map.json
-```
-
-This backend first estimates `H` from the online `rxGridSSB`, applies the Fisher feature extraction saved with the model, and evaluates the exported PyTorch linear classifier. Labels and their probabilities are read from the checkpoint, so there is no fixed number of position classes.
-
-The checkpoint normally provides PCI and `i_bar_SSB`. If the deployment transmitter configuration differs, override them explicitly with `--fisher-pci` and `--fisher-ibar`. Add every non-empty training label to `config/sionna_mitsuba_position_map.json` so that a predicted position can be represented in the generated Mitsuba scene.
-
----
-
-# Recommended workflow for a new deployment
-
-For a new room, factory or antenna arrangement:
-
-1. Install the repository and UHD environment.
-2. Connect the USRP B210 and verify UHD communication.
-3. Determine the correct frequency, sample rate, gain, channel, antenna and NID2.
-4. Define the target classes, for example `empty`, `P1`, `P2`, `P3`.
-5. Collect several labeled sessions for every class.
-6. Inspect the datasets for capture and preprocessing problems.
-7. Split the data correctly into training, validation and test groups.
-8. Run `run_ssb_sensing_analysis.py` to analyse the signal and train the generic model.
-9. Replay-test `model_fisher_logreg.pt` on saved H5 data.
-10. Add the non-empty class labels to the Mitsuba position map.
-11. Run online inference with `--inference-backend torch-fisher`.
-12. Configure the remote JSON and optional XML destinations.
-13. Validate the state read by the external Digital Twin consumer.
-
-Do not assume that the demonstration checkpoint will work correctly in the new deployment.
-
----
-
-# Mitsuba/Sionna XML export
-
-The online inference script can export two synchronized outputs:
-
-```text
-1. JSON inference state
-2. Mitsuba XML scene for Sionna or ray-tracing workflows
-```
-
-The JSON remains the main machine-readable sensing state.
-
-The XML is generated from the same prediction and configured position coordinates.
-
-Position map:
-
-```text
-config/sionna_mitsuba_position_map.json
-```
-
-Default local XML output:
-
-```text
-results/online/live_person_sionna_scene.xml
-```
-
-## Position-coordinate map
-
-The coordinate file maps each predicted position to a translation and orientation.
-
-Example structure:
-
-```json
-{
-  "P1": {
-    "translation_m": [6.0, 7.0, 0.0],
-    "yaw_deg": 0.0
-  },
-  "P5": {
-    "translation_m": [2.0, 6.0, 0.0],
-    "yaw_deg": 0.0
-  }
-}
-```
-
-The current map uses a deployment-specific coordinate convention.
-
-Before using it in another scene, verify:
-
-- scene origin;
-- X-axis direction;
-- Y-axis direction;
-- Z-axis direction;
-- units;
-- floor height;
-- object orientation.
-
-If the Sionna or Mitsuba scene uses another origin, scale or axis convention, update:
-
-```text
-config/sionna_mitsuba_position_map.json
-```
-
----
-
-## Generate JSON and XML locally
-
-Run:
-
-```bash
-python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
-  --serial <serial_id> \
-  --freq 3541.44e6 \
-  --rate 15.36e6 \
-  --gain 60 \
-  --duration-ms 20 \
-  --num-iters 30 \
-  --warmup-iters 5 \
-  --channel 0 \
-  --antenna RX2 \
-  --force-nid2 0 \
-  --enable-cfo-correction \
-  --cfo-warmup-iters 30 \
-  --cfo-correction-sign -1 \
-  --inference-backend torch-fisher \
-  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
-  --torch-device cpu \
-  --mitsuba-position-map-json config/sionna_mitsuba_position_map.json \
-  --enable-mitsuba-export \
-  --disable-scp \
-  --progress-every 1
-```
-
-Generated files:
-
-```text
-results/online/live_inference_state_5G.json
-results/online/live_person_sionna_scene.xml
-```
-
-A successful iteration should show:
-
-```text
-mitsuba=1
-```
-
-Because SCP is disabled, the same line should show:
-
-```text
-mitsuba_scp=0
-```
-
----
-
-## Send JSON and XML to a remote machine
-
-Use the normal JSON destination:
-
-```text
---remote-target <remote_user>@<remote_host>:<remote_directory>/<remote_json_filename>
-```
-
-Enable XML generation:
-
-```text
---enable-mitsuba-export
-```
-
-Example:
-
-```bash
-python src/python/ssb_python/online_5g_python_cfo_json_scp.py \
-  --serial <serial_id> \
-  --freq 3541.44e6 \
-  --rate 15.36e6 \
-  --gain 60 \
-  --duration-ms 20 \
-  --num-iters 30 \
-  --warmup-iters 5 \
-  --channel 0 \
-  --antenna RX2 \
-  --force-nid2 0 \
-  --enable-cfo-correction \
-  --cfo-warmup-iters 30 \
-  --cfo-correction-sign -1 \
-  --inference-backend torch-fisher \
-  --fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt \
-  --torch-device cpu \
-  --remote-target <remote_user>@<remote_host>:<remote_directory>/<remote_json_filename> \
-  --scp-every 1 \
-  --mitsuba-position-map-json config/sionna_mitsuba_position_map.json \
-  --enable-mitsuba-export \
-  --progress-every 1
-```
-
-If no explicit XML target is configured, the current script can send the XML to the same remote directory using:
-
-```text
-live_person_sionna_scene.xml
-```
-
-The remote directory must therefore be writable and must be the directory expected by the external Sionna/Mitsuba workflow.
-
-Successful iterations should show:
-
-```text
-scp=1
-mitsuba=1
-mitsuba_scp=1
-```
-
----
-
-# Threshold inference backend
-
-The repository contains a simple threshold backend for debugging the JSON and SCP mechanisms.
-
-Configuration file:
-
-```text
-config/generic_5g_binary_model.json
-```
-
-Example selection:
-
-```bash
---inference-backend threshold \
---model-config config/generic_5g_binary_model.json
-```
-
-This is not the trained PyTorch sensing model.
-
-Use the threshold backend only for development or transport testing. For the actual model pipeline, use:
-
-```bash
---inference-backend torch-fisher \
---fisher-model results/ssb_sensing_analysis/model_fisher_logreg.pt
-```
-
----
-
-# Main scripts
-
-| Script | Purpose |
-|---|---|
-| `src/python/ssb_python/online_5g_python_cfo_json_scp.py` | Complete online Python sensing, inference, JSON, SCP and optional XML export |
-| `src/python/ssb_python/rxgrid_torch_inference.py` | Loads the PyTorch checkpoint and performs inference |
-| `src/python/ssb_python/ssb_fisher_torch_inference.py` | Fisher channel frontend and equivalent PyTorch multi-class inference |
-| `src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py` | Operator-friendly labeled dataset collection |
-| `src/python/ssb_python/capture_online_rxgridssb_dataset_cfo.py` | Lower-level CFO-corrected dataset capture |
-| `src/python/ssb_python/test_rxgrid_torch_checkpoint_on_h5.py` | Tests a checkpoint on a saved H5 dataset |
-| `src/python/ssb_python/analyze_rxgrid_distributions.py` | Generates diagnostic plots for saved datasets |
-| `src/python/run_ssb_sensing_analysis.py` | Generic multi-label offline analysis, Fisher selection, training and deployment-checkpoint export |
-| `src/python/ssb_python/capture_iq_blocks_uhd.py` | Raw IQ capture for low-level debugging |
-| `src/python/ssb_python/compare_interleaved_python_matlab.py` | Historical Python/MATLAB comparison |
-
----
-
-# Generated files and Git policy
-
-Do not commit large generated data or runtime output folders.
-
-Typical generated paths include:
-
-```text
-data/python_ssb_datasets/
-results/online/
-results/python_online_rxgridssb_dataset_cfo/
-results/python_rxgrid_distribution/
-results/python_matlab_rxgrid_compare/
-logs/
-```
-
-The included demonstration checkpoint may remain in the repository when required for end-to-end testing:
-
-```text
-results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt
-```
-
----
-
-# Troubleshooting
-
-## `ModuleNotFoundError: No module named 'uhd'`
-
-Verify:
-
-```bash
-sudo apt install -y python3-uhd
-```
-
-The environment must have been created with:
-
-```bash
-python3 -m venv --system-site-packages .venv_uhd
-```
-
-Recreate it if necessary.
-
----
-
-## `ModuleNotFoundError: No module named 'torch'`
-
-Install the project dependencies:
-
-```bash
-python -m pip install -r requirements.txt
-```
-
-Confirm:
-
-```bash
-python -c "import torch; print(torch.__version__)"
-```
-
----
-
-## No USRP is detected
-
-Run:
-
-```bash
-uhd_find_devices
-```
-
-Check:
-
-- USB cable;
-- USB 3 port;
-- device power;
-- UHD installation;
-- whether another application is using the B210.
-
----
-
-## The script reports `valid=0`
-
-Inspect:
-
-- `err=`;
-- PSS metric;
-- selected NID2;
-- frequency;
-- gain;
-- antenna selection;
-- physical antenna connection;
-- CFO estimate.
-
-The deployment-specific parameters may not match the received 5G cell.
-
----
-
-## The model checkpoint cannot be loaded
-
-Verify the path:
-
-```bash
-ls -l results/binary_empty_vs_P5_rx/model_rxGridSSB/model.pt
-```
-
-The command must be executed from the repository root.
-
-A replacement checkpoint must use the format expected by:
-
-```text
-src/python/ssb_python/rxgrid_torch_inference.py
-```
-
----
-
-## SCP asks for a password
-
-Configure SSH key authentication.
-
-Verify:
-
-```bash
-ssh -o BatchMode=yes <remote_user>@<remote_host> "echo SSH_OK"
-```
-
-If multiple SSH keys exist, copy the intended public key explicitly:
-
-```bash
-ssh-copy-id -i ~/.ssh/id_ed25519.pub \
-  <remote_user>@<remote_host>
-```
-
----
-
-## SCP reports `Permission denied`
-
-Check the remote directory:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "ls -ld <remote_directory>"
-```
-
-The remote user must have write permission.
-
----
-
-## SCP reports `No such file or directory`
-
-Create the directory:
-
-```bash
-ssh <remote_user>@<remote_host> \
-  "mkdir -p <remote_directory>"
-```
-
----
-
-## `Host key verification failed`
-
-Connect manually:
-
-```bash
-ssh <remote_user>@<remote_host>
-```
-
-Verify the fingerprint before accepting it.
-
----
-
-## The CSV contains rows from previous runs
-
-The current CSV log is appended to.
-
-Inspect:
-
-```bash
-wc -l results/online/python_5g_online_inference_log.csv
-```
-
-Remove it before a clean test only when previous logs are no longer needed:
-
-```bash
-rm results/online/python_5g_online_inference_log.csv
-```
-
-The script will create it again during the next run.
-
----
-## Automatic SSB Discovery
-
-Discover unknown 5G NR FR1 SSBs without prior knowledge of the carrier frequency, band, SCS or NID2.
-
-Example:
-
-```bash
-python src/python/ssb_python/scan_5g_ssb_auto.py \
-    --serial <USRP_SERIAL> \
-    --gain 60 \
-    --mode quick
-```
-### Useful options:
-```text
---start-mhz 3300
---stop-mhz 3800
---mode quick|balanced|exhaustive
-```
----
-
-# Historical MATLAB reference
-
-The recommended deployment is Python-only. MATLAB is not required for normal operation.
-
-The older workflow used:
-
-```text
-MATLAB capture
-  → MATLAB rxGridSSB extraction
-  → TCP transfer to Python
-  → Python inference
-  → JSON
-  → SCP
-```
-
-That workflow is preserved only for historical validation and comparison.
-
-Relevant files include:
-
-```text
-README_online_ssB_empty_p5.md
-run_python_matlab_interleaved_capture.sh
-src/python/ssb_python/compare_interleaved_python_matlab.py
-```
-
-The practical objective is not permanent bit-exact MATLAB equivalence.
-
-The current objective is:
-
-```text
-stable Python extraction
-consistent Python rxGridSSB representation
-training on Python-generated rxGridSSB
-online inference using the same Python processing chain
-```
-
-Use the MATLAB comparison utilities only when investigating extraction differences or validating future signal-processing changes.
-
----
-
 # WiFi CSI Acquisition using USRP B210
 
 This project includes a Python receiver that extracts Channel State Information (CSI) from IEEE 802.11 beacon frames using a USRP B210 and the GNU Radio `gr-ieee802-11` module.
@@ -2635,6 +2039,300 @@ A strong signal reported by `nmcli` therefore does not guarantee that the access
 
 ---
 
+# Automatic SSB Discovery
+
+Discover unknown 5G NR FR1 SSBs without prior knowledge of the carrier frequency, band, SCS or NID2.
+
+Example:
+
+```bash
+python src/python/ssb_python/scan_5g_ssb_auto.py \
+    --serial <USRP_SERIAL> \
+    --gain 60 \
+    --mode quick
+```
+## Useful options
+```text
+--start-mhz 3300
+--stop-mhz 3800
+--mode quick|balanced|exhaustive
+```
+---
+
+# Historical MATLAB reference
+
+The recommended deployment is Python-only. MATLAB is not required for normal operation.
+
+The older workflow used:
+
+```text
+MATLAB capture
+  → MATLAB rxGridSSB extraction
+  → TCP transfer to Python
+  → Python inference
+  → JSON
+  → SCP
+```
+
+That workflow is preserved only for historical validation and comparison.
+
+Relevant files include:
+
+```text
+legacy_models/docs/README_online_ssB_empty_p5.md
+run_python_matlab_interleaved_capture.sh
+src/python/ssb_python/compare_interleaved_python_matlab.py
+```
+
+The practical objective is not permanent bit-exact MATLAB equivalence.
+
+The current objective is:
+
+```text
+stable Python extraction
+consistent Python rxGridSSB representation
+training on Python-generated rxGridSSB
+online inference using the same Python processing chain
+```
+
+Use the MATLAB comparison utilities only when investigating extraction differences or validating future signal-processing changes.
+
+---
+
+# Main scripts
+
+| Script | Purpose |
+|---|---|
+| `src/python/ssb_python/online_5g_ssb_sensing.py` | Online sensing: capture, DSP, radio check, Fisher inference, Sensing API publication, local JSON/CSV and optional Mitsuba XML |
+| `src/python/ssb_python/ssb_fisher_torch_inference.py` | Shared channel/feature frontend, radio check, PyTorch model and sklearn → PyTorch export |
+| `src/python/run_ssb_sensing_analysis.py` | Generic multi-label offline analysis, Fisher selection, training and deployment-checkpoint export |
+| `src/python/ssb_python/replay_fisher_checkpoint_on_h5.py` | Replays a checkpoint on a saved H5 dataset |
+| `src/python/ssb_python/collect_labeled_rxgridssb_dataset_cfo.py` | Operator-friendly labeled dataset collection |
+| `src/python/ssb_python/capture_online_rxgridssb_dataset_cfo.py` | Lower-level CFO-corrected dataset capture |
+| `src/python/ssb_python/analyze_rxgrid_distributions.py` | Generates diagnostic plots for saved datasets |
+| `src/python/ssb_python/scan_5g_ssb_auto.py` | Automatic 5G SSB discovery |
+| `src/python/ssb_python/capture_iq_blocks_uhd.py` | Raw IQ capture for low-level debugging |
+| `src/python/ssb_python/compare_interleaved_python_matlab.py` | Historical Python/MATLAB comparison |
+| `src/python/sensing_api/capif_core.py` | CAPIF Core Function |
+| `src/python/sensing_api/server.py` | Sensing API (CAPIF AEF) |
+| `src/python/sensing_api/consume.py` | Example consumer (CAPIF invoker) |
+| `src/python/sensing_api/label_map.py` | Label map parser and checker |
+| `src/python/sensing_api/producer.py` | Report builder and non-blocking publisher |
+| `src/python/sensing_api/mitsuba.py` | Detections → Mitsuba XML |
+| `src/python/wifi_csi/beacon_csi_receiver.py` | WiFi CSI receiver |
+| `src/python/wifi_csi/beacon_csi_dataset_receiver.py` | WiFi CSI dataset receiver |
+
+Configuration files:
+
+| File | Purpose |
+|---|---|
+| `config/sensing_label_map.json` | Model label → objects and coordinates |
+| `config/sensing_api_config.json` | CAPIF and Sensing API hosts and ports |
+| `config/map_zones.json`, `config/target_ssb.json`, `config/sensing_config.json` | Used by the historical MATLAB workflow |
+
+---
+
+# Tests
+
+The automated tests run without a USRP (the radio is simulated with synthetic SSB grids):
+
+```bash
+python -m pytest
+```
+
+They check that:
+
+- the online features and the PyTorch probabilities are identical to the offline scikit-learn pipeline (multi-class and binary);
+- the radio check accepts the training SSB and rejects another i_bar_SSB, another cell (PCI), noise grids and a wrong NID2;
+- the label map is validated and model labels without coordinates are refused;
+- the Sensing API accepts, validates, filters and serves reports, and the producer token works;
+- end to end over real HTTP: the Sensing API registers in the CAPIF Core Function, a consumer discovers it, the producer publishes through CAPIF discovery and the consumer receives the report by polling and by the event stream;
+- the online script `main()` runs with a simulated radio, rejects bad grids and publishes the right detections;
+- the Mitsuba XML places the person at the published coordinates (when Mitsuba is installed).
+
+---
+
+# Legacy models
+
+Earlier models and experiments are kept in [`legacy_models/`](legacy_models/README.md): the binary CNN checkpoint, its loader and replay test, the threshold backend configuration, ROI/hybrid/CNN training pipelines, explainability and calibration scripts, the old online servers, the SCP launcher and the old runbooks. They are not used by the current pipeline and were moved without modification.
+
+---
+
+# Generated files and Git policy
+
+Do not commit large generated data or runtime output folders.
+
+Typical generated paths include:
+
+```text
+data/python_ssb_datasets/
+results/ssb_sensing_analysis/
+results/online/
+results/python_online_rxgridssb_dataset_cfo/
+results/python_rxgrid_distribution/
+results/python_matlab_rxgrid_compare/
+logs/
+```
+
+Trained models are deployment-specific and are not committed. Keep the `results/ssb_sensing_analysis/` output of each deployment together with its label map.
+
+---
+
+# Troubleshooting
+
+## `ModuleNotFoundError: No module named 'uhd'`
+
+Verify:
+
+```bash
+sudo apt install -y python3-uhd
+```
+
+The environment must have been created with:
+
+```bash
+python3 -m venv --system-site-packages .venv_uhd
+```
+
+Recreate it if necessary.
+
+---
+
+## `ModuleNotFoundError: No module named 'torch'`
+
+Install the project dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Confirm:
+
+```bash
+python -c "import torch; print(torch.__version__)"
+```
+
+---
+
+## No USRP is detected
+
+Run:
+
+```bash
+uhd_find_devices
+```
+
+Check:
+
+- USB cable;
+- USB 3 port;
+- device power;
+- UHD installation;
+- whether another application is using the B210.
+
+---
+
+## The script reports `valid=0`
+
+Inspect:
+
+- `err=`;
+- PSS metric;
+- selected NID2;
+- frequency;
+- gain;
+- antenna selection;
+- physical antenna connection;
+- CFO estimate;
+- the radio check, when the error is `nid2_mismatch`, `pci_mismatch` or `ibar_mismatch` (see below).
+
+The deployment-specific parameters may not match the received 5G cell.
+
+---
+
+## The script reports `err=ibar_mismatch`, `err=pci_mismatch` or `err=nid2_mismatch`
+
+The received SSB does not match the PCI/i_bar_SSB the model was trained with (see [the radio check](#radio-check-pci-and-i_bar_ssb)).
+
+- `nid2_mismatch`: `--force-nid2` differs from the model's `PCI mod 3`. Use the same NID2 as during dataset collection.
+- `pci_mismatch`: the grid comes from another cell, or the SSB was not really detected (noise). Check frequency, NID2 and the PSS metric.
+- `ibar_mismatch` on every iteration: the cell or SSB beam differs from the training data. Check the receiver position and the cell, compare with `detection_summary.json` of the training run, and retrain if the deployment changed. Use `--fisher-ibar` only if you know the transmitter configuration changed on purpose.
+- `ibar_mismatch` on some iterations: the receiver alternates between SSB beams; those iterations are discarded on purpose. The CSV column `detected_ibar` shows the distribution.
+
+---
+
+## The model checkpoint cannot be loaded
+
+Verify the path:
+
+```bash
+ls -l results/ssb_sensing_analysis/model_fisher_logreg.pt
+```
+
+The command must be executed from the repository root.
+
+The checkpoint must be produced by `run_ssb_sensing_analysis.py` (`model_type = torch_fisher_logreg`). Checkpoints of the legacy CNN are not supported by the current pipeline.
+
+---
+
+## `LabelMapError: Labels without coordinates`
+
+The model has classes that are not in `config/sensing_label_map.json`. Add them (use `[]` for labels without objects) and check:
+
+```bash
+cd src/python
+python -m sensing_api.label_map ../../config/sensing_label_map.json \
+  --model ../../results/ssb_sensing_analysis/model_fisher_logreg.pt
+```
+
+---
+
+## The Sensing API is not registered in CAPIF
+
+`GET /sensing/v1/health` shows `"capif_registered": false` and the server log repeats `CAPIF registration failed ... retrying`.
+
+- Check that the CCF is running: `curl -s <capif_base_url>/health`.
+- Check `capif.base_url` / `SENSING_CAPIF_URL` from the Sensing API computer.
+- The CCF keeps its registry in memory. The Sensing API verifies its registration every 30 s and registers again automatically after a CCF restart, so allow up to 30 s before it is discoverable again.
+
+---
+
+## Consumers discover the API but cannot connect
+
+The address published in CAPIF is `advertised_host:port`. If it is `127.0.0.1`, remote consumers cannot use it. Set `SENSING_API_ADVERTISED_HOST=<reachable ip>` and restart the Sensing API. Check the firewall for ports 8080 and 8090.
+
+---
+
+## The online script shows `api=<sent>/<failed>` with failures
+
+- `http_401`: the server requires a producer token; pass `--api-token` or set `SENSING_API_PRODUCER_TOKEN`.
+- `http_422`: the report does not match the data contract (the server response is in the CSV `error` column only for the first characters; check the Sensing API log).
+- `ConnectError` / `capif_discovery`: the Sensing API or the CCF is not reachable from the sensing computer.
+
+Sensing continues while the API is down; only the newest state is sent when it comes back.
+
+---
+
+## The CSV contains rows from previous runs
+
+The current CSV log is appended to.
+
+Inspect:
+
+```bash
+wc -l results/online/python_5g_online_inference_log.csv
+```
+
+Remove it before a clean test only when previous logs are no longer needed:
+
+```bash
+rm results/online/python_5g_online_inference_log.csv
+```
+
+The script will create it again during the next run.
+
+---
+
 # Current project status
 
 Completed:
@@ -2645,20 +2343,25 @@ Completed:
 - OFDM demodulation;
 - `dataSSB` extraction;
 - `rxGridSSB` extraction;
-- PyTorch inference;
-- local JSON output;
-- local CSV log;
-- passwordless SCP-compatible remote transfer;
 - labeled dataset collection;
 - dataset analysis;
-- checkpoint testing;
+- generic multi-label Fisher + logistic-regression training;
+- PyTorch deployment of the trained model, verified equal to the offline pipeline;
+- per-grid radio check (NID2, i_bar_SSB);
+- label → coordinates map;
+- CAPIF Core Function and CAPIF-exposed Sensing API;
+- non-blocking publication from the online pipeline;
+- example consumer with CAPIF discovery, polling and streaming;
+- local JSON output and CSV log;
 - optional Mitsuba/Sionna XML output;
+- automated tests;
 - WiFi CSI receiver for OFDM beacon frames.
 
 Future integration work:
 
-- Isaac Sim JSON consumer;
-- Digital Twin scene update logic;
-- final coordinate alignment between sensing and the Digital Twin;
+- final coordinates in the label map, aligned with the Digital Twin frame;
+- Digital Twin / Isaac Sim consumer of the Sensing API;
+- publishing WiFi CSI results through the same Sensing API;
+- TLS and real CAPIF authorisation for deployments outside the lab network;
 - MikroTik integration;
 - complete multi-component orchestration.

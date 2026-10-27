@@ -1,0 +1,14 @@
+{
+  "capif": {
+    "host": "0.0.0.0",
+    "port": 8080,
+    "base_url": "http://127.0.0.1:8080/capif/v1"
+  },
+  "sensing_api": {
+    "host": "0.0.0.0",
+    "port": 8090,
+    "advertised_host": "127.0.0.1",
+    "history_size": 1000,
+    "register_with_capif": true
+  }
+}

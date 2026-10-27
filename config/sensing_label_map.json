@@ -1,0 +1,19 @@
+{
+  "schema_version": "sensing_label_map_v1",
+  "description": "Generic template. Keys must match the dataset label folders used to train the model. Coordinates are placeholders until the Digital Twin layout is fixed; edit them here without retraining.",
+  "frame_id": "world",
+  "units": "m",
+  "default_object_type": "person",
+  "labels": {
+    "empty": [],
+    "position_1": [
+      {"object_type": "person", "position": {"x": 0.0, "y": 0.0, "z": 0.0}, "yaw_deg": 0.0}
+    ],
+    "position_2": [
+      {"object_type": "person", "position": {"x": 1.0, "y": 0.0, "z": 0.0}, "yaw_deg": 0.0}
+    ],
+    "position_3": [
+      {"object_type": "person", "position": {"x": 2.0, "y": 0.0, "z": 0.0}, "yaw_deg": 0.0}
+    ]
+  }
+}

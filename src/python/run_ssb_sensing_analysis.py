@@ -60,6 +60,8 @@ from py3gpp.nrPBCHDMRS import nrPBCHDMRS
 from py3gpp.nrPBCHDMRSIndices import nrPBCHDMRSIndices
 from py3gpp.nrChannelEstimate import nrChannelEstimate
 from ssb_python.ssb_fisher_torch_inference import (
+    build_reference_grid,
+    compute_spectral_features,
     export_sklearn_pipeline_as_torch,
 )
 
@@ -446,41 +448,7 @@ def detect_ibar(rxgrid, pci):
 # CHANNEL ESTIMATION
 # ============================================================
 
-def build_reference_grid(
-    pci,
-    ibar,
-):
-    """
-    Build a 240 x 4 reference SSB grid using
-    PBCH-DMRS and SSS.
-    """
-
-    reference_grid = np.zeros(
-        (240, 4),
-        dtype=np.complex128,
-    )
-
-    k_idx, s_idx = nrPBCHDMRSIndices(
-        pci,
-        style="python",
-    )
-
-    reference_grid[
-        np.asarray(k_idx),
-        np.asarray(s_idx),
-    ] = nrPBCHDMRS(
-        pci,
-        ibar,
-    )
-
-    reference_grid[
-        56:183,
-        2,
-    ] = nrSSS(
-        pci
-    )
-
-    return reference_grid
+# build_reference_grid is imported from ssb_fisher_torch_inference.
 
 
 def estimate_channel(
@@ -679,97 +647,8 @@ def chronological_split(
 # SPECTRAL FEATURES
 # ============================================================
 
-def compute_spectral_features(
-    normalized_magnitude,
-):
-    """
-    Compute the same 9 spectral features used previously.
-
-    Input:
-        [N, 240, 4]
-
-    Features:
-        low mean
-        low std
-
-        mid mean
-        mid std
-
-        high mean
-        high std
-
-        low - mid
-        high - mid
-        high - low
-    """
-
-    bands = {
-        "low": (
-            0,
-            57,
-        ),
-        "mid": (
-            57,
-            168,
-        ),
-        "high": (
-            168,
-            240,
-        ),
-    }
-
-    means = {}
-    stds = {}
-
-    for band_name, (
-        start,
-        stop,
-    ) in bands.items():
-
-        band = (
-            normalized_magnitude[
-                :,
-                start:stop,
-                :,
-            ]
-        )
-
-        means[
-            band_name
-        ] = np.mean(
-            band,
-            axis=(1, 2),
-        )
-
-        stds[
-            band_name
-        ] = np.std(
-            band,
-            axis=(1, 2),
-        )
-
-    return np.stack(
-        [
-            means["low"],
-            stds["low"],
-
-            means["mid"],
-            stds["mid"],
-
-            means["high"],
-            stds["high"],
-
-            means["low"]
-            - means["mid"],
-
-            means["high"]
-            - means["mid"],
-
-            means["high"]
-            - means["low"],
-        ],
-        axis=1,
-    )
+# compute_spectral_features is imported from ssb_fisher_torch_inference
+# so the online pipeline computes exactly the same 9 band features.
 
 
 # ============================================================
@@ -2244,7 +2123,15 @@ def main():
         for label in labels
         for session in processed_sessions[label]
     ]
-    (deployment_pci, deployment_ibar), _ = Counter(radio_pairs).most_common(1)[0]
+    radio_pair_counts = Counter(radio_pairs)
+    (deployment_pci, deployment_ibar), _ = radio_pair_counts.most_common(1)[0]
+    if len(radio_pair_counts) > 1:
+        warnings.warn(
+            "Sessions use different (PCI, i_bar_SSB) pairs "
+            f"{dict(radio_pair_counts)}. The deployment checkpoint uses "
+            f"PCI={deployment_pci}, i_bar={deployment_ibar}; online grids "
+            "with another i_bar_SSB are rejected as invalid."
+        )
     deployment_checkpoint = args.output / "model_fisher_logreg.pt"
     deployment_joblib = args.output / "model_fisher_logreg.joblib"
     deployment_metadata = {
@@ -2254,7 +2141,6 @@ def main():
             "pci": deployment_pci,
             "ibar": deployment_ibar,
         },
-        "empty_labels": [label for label in labels if label.casefold() == "empty"],
     }
     joblib.dump(
         {
@@ -2269,7 +2155,6 @@ def main():
         classes=labels,
         selected_resource_elements=selected_resource_elements,
         radio_configuration=deployment_metadata["radio_configuration"],
-        empty_labels=deployment_metadata["empty_labels"],
     )
 
     # --------------------------------------------------------

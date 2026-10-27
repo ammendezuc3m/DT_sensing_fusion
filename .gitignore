@@ -59,7 +59,7 @@ models/
 reports/
 
 # Ignore all new result folders by default.
-# The current EMPTY/P5 rxGridSSB result folder is already tracked selectively.
+# (The legacy demonstration model is kept under legacy_models/results/.)
 results/binary_empty_vs_P5/
 results/binary_empty_vs_P5_codex_check/
 results/binary_empty_vs_P5_codex_rx_check/
@@ -143,3 +143,6 @@ results/ssb_scan/
 
 # Offline SSB sensing analysis and Fisher/logistic-regression outputs
 results/ssb_sensing_analysis/
+
+# Test cache
+.pytest_cache/

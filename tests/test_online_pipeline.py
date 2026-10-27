@@ -138,3 +138,20 @@ def test_online_requires_api_destination(monkeypatch):
     monkeypatch.setattr(sys, "argv", ["online_5g_ssb_sensing.py"])
     with pytest.raises(SystemExit):
         online.parse_args()
+
+
+def test_online_reports_missing_ssb_clearly(setup, monkeypatch):
+    monkeypatch.setattr(online, "configure_usrp", lambda args: type("U", (), {"get_rx_rate": lambda self, ch: 15.36e6})())
+    monkeypatch.setattr(online, "make_rx_streamer",
+                        lambda usrp, ch: type("S", (), {"get_max_num_samps": lambda self: 2000})())
+
+    def no_ssb(**_kw):
+        raise RuntimeError("No valid CFO warmup estimates.")
+
+    monkeypatch.setattr(online, "estimate_cfo_warmup", no_ssb)
+    monkeypatch.setattr(sys, "argv", [
+        "online_5g_ssb_sensing.py", "--dsp-only", "--disable-api", "--enable-cfo-correction",
+        "--label-map", str(setup["label_map"]), "--freq", "3479.52e6",
+    ])
+    with pytest.raises(SystemExit, match="no SSB was detected at 3479.520 MHz"):
+        online.main()

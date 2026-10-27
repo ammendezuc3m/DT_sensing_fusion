@@ -324,10 +324,19 @@ def main() -> None:
         cfo_hz = float(args.manual_cfo_hz)
         print(f"\nUsing manual CFO: {cfo_hz:.3f} Hz")
     elif args.enable_cfo_correction:
-        cfo_hz, _ = estimate_cfo_warmup(
-            rx_streamer=rx_streamer, samples_per_block=samples_per_block, max_samps=max_samps,
-            sample_rate=actual_rate, args=args,
-        )
+        try:
+            cfo_hz, _ = estimate_cfo_warmup(
+                rx_streamer=rx_streamer, samples_per_block=samples_per_block, max_samps=max_samps,
+                sample_rate=actual_rate, args=args,
+            )
+        except RuntimeError as exc:
+            raise SystemExit(
+                f"\n[ERROR] CFO warmup failed ({exc}): no SSB was detected at "
+                f"{args.freq / 1e6:.3f} MHz with NID2={args.force_nid2} (PSS metric below "
+                f"{args.min_pss_metric}). Check that the gNB is transmitting, the frequency, "
+                "--force-nid2, the antenna port and the gain. "
+                "scan_5g_ssb_auto.py finds the SSBs on air."
+            ) from None
     else:
         cfo_hz = 0.0
         print("\nCFO correction disabled.")

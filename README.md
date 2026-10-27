@@ -1245,7 +1245,7 @@ A **report** is published by a producer once per inference:
     "method": "passive_ssb_fingerprinting",
     "model_name": "ssb_fisher_logreg",
     "model_version": "model_fisher_logreg.pt",
-    "metadata": {"center_frequency_hz": 3541440000.0, "sample_rate_sps": 15360000.0, "pci": 302, "ibar": 0}
+    "metadata": {"center_frequency_hz": 3541440000.0, "sample_rate_sps": 15360000.0, "pci": 731, "ibar": 0}
   },
   "timestamp": "2026-10-26T10:15:30.123456+00:00",
   "sequence": 1532,
@@ -1295,6 +1295,8 @@ The CAPIF descriptions declare `PKI` as interface metadata, as in the PRIME-6G i
 ---
 
 # Run online 5G SSB sensing
+
+The repository does not include a trained model: a fingerprinting model is specific to its cell and room, so train one for your deployment first ([Analyze and train](#analyze-and-train-the-fisher-ssb-sensing-model)).
 
 With the model trained, the label map completed and the services running:
 
@@ -2151,7 +2153,8 @@ They check that:
 - the label map is validated and model labels without coordinates are refused;
 - the Sensing API accepts, validates, filters and serves reports, and the producer token works;
 - end to end over real HTTP: the Sensing API registers in the CAPIF Core Function, a consumer discovers it, the producer publishes through CAPIF discovery and the consumer receives the report by polling and by the event stream;
-- the online script `main()` runs with a simulated radio, rejects bad grids and publishes the right detections;
+- the online script `main()` runs with a simulated radio, rejects bad grids, publishes the right detections and stops with a clear message when no SSB is found;
+- the trainer keeps only the snapshots of the target SSB beam and refuses a label captured on another beam;
 - the Mitsuba XML places the person at the published coordinates (when Mitsuba is installed).
 
 ---
@@ -2254,11 +2257,23 @@ The deployment-specific parameters may not match the received 5G cell.
 
 ---
 
+## `CFO warmup failed ... no SSB was detected`
+
+The script stops before the online loop because none of the CFO warmup captures contains an SSB (PSS metric around 0.01 instead of 0.5–0.98). There is no 5G cell at that frequency/NID2, or nothing reaches the receiver:
+
+- check that the gNB is transmitting;
+- find the SSBs on air with [Automatic SSB Discovery](#automatic-ssb-discovery) and use the reported frequency and NID2;
+- check the antenna port (`--antenna RX2`) and the gain.
+
+The radio parameters of a trained model are the ones stored in its dataset (`freq_hz` and `force_nid2` attributes of `session_data.h5`). If the cell on air is not the one of the dataset, the radio check rejects every grid (see below) and a new dataset is needed.
+
+---
+
 ## The script reports `err=ibar_mismatch`, `err=pci_mismatch` or `err=nid2_mismatch`
 
 The received SSB does not match the PCI/i_bar_SSB the model was trained with (see [the radio check](#radio-check-pci-and-i_bar_ssb)).
 
-- `nid2_mismatch`: `--force-nid2` differs from the model's `PCI mod 3`. Use the same NID2 as during dataset collection.
+- `nid2_mismatch`: `--force-nid2` differs from the model's `PCI mod 3`. Use the same NID2 as during dataset collection. If the only cell on air has another NID2, the model belongs to another cell and cannot be used here.
 - `pci_mismatch`: the grid comes from another cell, or the SSB was not really detected (noise). Check frequency, NID2 and the PSS metric.
 - `ibar_mismatch` on every iteration: the cell or SSB beam differs from the training data. Check the receiver position and the cell, compare with `detection_summary.json` of the training run, and retrain if the deployment changed. Use `--fisher-ibar` only if you know the transmitter configuration changed on purpose.
 - `ibar_mismatch` on some iterations: the receiver alternates between SSB beams; those iterations are discarded on purpose. The CSV column `detected_ibar` shows the distribution.
@@ -2298,6 +2313,18 @@ python -m sensing_api.label_map ../../config/sensing_label_map.json \
 - Check that the CCF is running: `curl -s <capif_base_url>/health`.
 - Check `capif.base_url` / `SENSING_CAPIF_URL` from the Sensing API computer.
 - The CCF keeps its registry in memory. The Sensing API verifies its registration every 30 s and registers again automatically after a CCF restart, so allow up to 30 s before it is discoverable again.
+
+---
+
+## `address already in use` when starting the services
+
+Another process uses port 8080 or 8090 (common on machines running other network functions). Start the services on other ports and point the producer and consumers to them:
+
+```bash
+cd src/python
+python -m sensing_api.capif_core --port 18080
+SENSING_CAPIF_URL=http://127.0.0.1:18080/capif/v1 python -m sensing_api.server --port 18090
+```
 
 ---
 

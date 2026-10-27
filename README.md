@@ -34,8 +34,9 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 7. [Sensing API and CAPIF](#sensing-api-and-capif)
 8. [Run online sensing](#run-online-5g-ssb-sensing)
 9. [Consume the Sensing API](#consume-the-sensing-api)
-10. [Mitsuba/Sionna XML export](#mitsubasionna-xml-export)
-11. [WiFi CSI](#wifi-csi-receiver-files-and-recommended-execution)
+10. [ROS 2 / Nav2 dynamic-obstacle bridge](#ros-2--nav2-dynamic-obstacle-bridge)
+11. [Mitsuba/Sionna XML export](#mitsubasionna-xml-export)
+12. [WiFi CSI](#wifi-csi-receiver-files-and-recommended-execution)
 12. [Main scripts](#main-scripts), [tests](#tests), [troubleshooting](#troubleshooting)
 
 ---
@@ -75,6 +76,7 @@ Main components:
 | CAPIF Core Function | `src/python/sensing_api/capif_core.py` | Provider/invoker enrolment, API publication, discovery and routing |
 | Sensing API (AEF) | `src/python/sensing_api/server.py` | Receives reports and serves detections, history and an event stream |
 | Example consumer | `src/python/sensing_api/consume.py` | CAPIF discovery + polling/streaming + JSON/Mitsuba conversion |
+| ROS 2 / Nav2 bridge | `src/python/sensing_api/ros2_dynamic_obstacle_bridge.py` | Sensing API detections → Nav2 `DynamicObstacle` messages |
 
 ## Recommended 5G SSB workflow
 
@@ -1177,7 +1179,7 @@ Results are published through a REST API instead of copying files to another com
 | CAPIF Core Function | 8080 | CCF: provider/invoker enrolment, publication, discovery, routing | `sensing_api.capif_core` |
 | Sensing API | 8090 | API Exposing Function (AEF) for `sensing-api` | `sensing_api.server` |
 | Online pipeline | — | producer of reports | `online_5g_ssb_sensing.py` |
-| Consumers | — | API invokers | e.g. `sensing_api.consume` |
+| Consumers | — | API invokers | e.g. `sensing_api.consume`, `sensing_api.ros2_dynamic_obstacle_bridge` |
 
 On startup the Sensing API enrols as an API provider in the CCF and publishes its `ServiceAPIDescription` as `sensing-api`. If the CCF is not running yet it keeps retrying every 5 s. Consumers enrol as invokers, discover `sensing-api` and obtain its address from the routing information; they never need a hard-coded host.
 
@@ -1450,6 +1452,57 @@ with CapifInvoker("http://<capif_host>:8080/capif/v1") as capif:
 for det in httpx.get(f"{base_url}/sensing/v1/detections", params={"max_age_s": 2}).json()["detections"]:
     print(det["object_type"], det["position"], det["confidence"], det["sensor_id"])
 ```
+
+---
+
+# ROS 2 / Nav2 dynamic-obstacle bridge
+
+`sensing_api.ros2_dynamic_obstacle_bridge` is a separate consumer that connects the Sensing API with Florian's `nav2_dynamic_obstacle_layer`. It reads active detections from the API and publishes one circular `dynamic_obstacle_msgs/msg/DynamicObstacle` per detection to Nav2. The 5G online producer remains unchanged: it publishes only to the Sensing API.
+
+```text
+5G online sensing → Sensing API → ROS 2 bridge → /global_costmap/dynamic_obstacles → Nav2
+```
+
+The computer running the bridge needs ROS 2 and the workspace that provides `dynamic_obstacle_msgs` and the Nav2 dynamic-obstacle layer. This is external to the Python `requirements.txt`. In every terminal that runs the bridge, source both environments first:
+
+```bash
+source /opt/ros/<ros_distro>/setup.bash
+source <nav2_dynamic_obstacle_workspace>/install/setup.bash
+```
+
+Start the Sensing API and a sensing producer first. Then, from `src/python` with the project virtual environment active, start the bridge:
+
+```bash
+python -m sensing_api.ros2_dynamic_obstacle_bridge \
+  --capif-url http://<capif_host>:8080/capif/v1 \
+  --topic /global_costmap/dynamic_obstacles \
+  --object-type person \
+  --max-age-s 2 \
+  --person-radius-m 0.40
+```
+
+The bridge discovers the Sensing API through CAPIF, polls its current detections every 0.5 seconds, and keeps the same ROS obstacle identifier for the same `sensor_id` and `object_id`. An `empty` or invalid sensing report yields no active detection, so the bridge stops refreshing that obstacle. Configure the Nav2 dynamic-obstacle layer's expiry/timeout according to its own documentation so that a stopped obstacle is removed from its costmap.
+
+The API position frame and the Nav2 costmap frame must represent the same physical coordinates. Use `--expected-frame-id world` to reject detections from a different API frame. When the two frames differ by a known fixed planar transform, configure `--translate-x-m`, `--translate-y-m` and `--rotate-deg` before using it with Nav2.
+
+## Check the bridge
+
+In a second ROS 2 terminal, source the same two ROS environments and inspect the messages:
+
+```bash
+ros2 topic echo /global_costmap/dynamic_obstacles dynamic_obstacle_msgs/msg/DynamicObstacle
+```
+
+When a label mapped to a `person` is detected, the output must contain a circle (`shape: 0`) with one `x_points` and `y_points` value, and the configured `radius`. For a one-shot check, publish the current API state once and exit:
+
+```bash
+python -m sensing_api.ros2_dynamic_obstacle_bridge \
+  --api-url http://<sensing_host>:8090 \
+  --topic /global_costmap/dynamic_obstacles \
+  --once
+```
+
+Use `ros2 topic list | grep dynamic_obstacles` if the topic is not visible. The script requires `dynamic_obstacle_msgs`; if that package cannot be imported, source the Nav2 workspace again and rebuild it if necessary.
 
 ---
 
@@ -2122,6 +2175,7 @@ Use the MATLAB comparison utilities only when investigating extraction differenc
 | `src/python/sensing_api/capif_core.py` | CAPIF Core Function |
 | `src/python/sensing_api/server.py` | Sensing API (CAPIF AEF) |
 | `src/python/sensing_api/consume.py` | Example consumer (CAPIF invoker) |
+| `src/python/sensing_api/ros2_dynamic_obstacle_bridge.py` | Consumer that publishes API detections to Nav2 dynamic obstacles |
 | `src/python/sensing_api/label_map.py` | Label map parser and checker |
 | `src/python/sensing_api/producer.py` | Report builder and non-blocking publisher |
 | `src/python/sensing_api/mitsuba.py` | Detections → Mitsuba XML |

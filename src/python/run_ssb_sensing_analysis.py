@@ -62,6 +62,7 @@ from py3gpp.nrChannelEstimate import nrChannelEstimate
 from ssb_python.ssb_fisher_torch_inference import (
     build_reference_grid,
     compute_spectral_features,
+    dmrs_ibar_scores,
     export_sklearn_pipeline_as_torch,
 )
 
@@ -122,6 +123,17 @@ def parse_arguments():
         help=(
             "Number of random H-magnitude snapshots "
             "to plot per label."
+        ),
+    )
+
+    parser.add_argument(
+        "--target-ibar",
+        type=int,
+        choices=range(8),
+        default=None,
+        help=(
+            "SSB beam (i_bar_SSB) used for training. Snapshots of other beams "
+            "are discarded. Default: the most frequent one in the dataset."
         ),
     )
 
@@ -1204,6 +1216,10 @@ def main():
     }
 
     detection_summary = {}
+    pending_sessions = {
+        label: []
+        for label in labels
+    }
 
     for label in labels:
 
@@ -1291,34 +1307,28 @@ def main():
                     f"{score:.4f}"
                 )
 
+            # i_bar_SSB of every snapshot: the receiver may lock onto
+            # different SSB beams within one session.
+            snapshot_ibar = np.asarray(
+                [
+                    int(np.argmax(dmrs_ibar_scores(rxgrid[:, :, i], pci)))
+                    for i in range(rxgrid.shape[2])
+                ]
+            )
+            ibar_counts = np.bincount(snapshot_ibar, minlength=8)
             print(
-                "  Estimating H..."
+                "  Per-snapshot i_bar_SSB counts: "
+                + ", ".join(f"{i}:{c}" for i, c in enumerate(ibar_counts) if c)
             )
 
-            channel = estimate_channel(
-                rxgrid,
-                pci,
-                ibar,
-            )
-
-            processed_sessions[
-                label
-            ].append(
+            pending_sessions[label].append(
                 {
-                    "path":
-                        str(
-                            session_path
-                        ),
-                    "H":
-                        channel,
-                    "pci":
-                        pci,
-                    "nid1":
-                        nid1,
-                    "nid2":
-                        nid2,
-                    "ibar":
-                        ibar,
+                    "path": str(session_path),
+                    "rxgrid": rxgrid,
+                    "pci": pci,
+                    "nid1": nid1,
+                    "nid2": nid2,
+                    "snapshot_ibar": snapshot_ibar,
                 }
             )
 
@@ -1358,41 +1368,97 @@ def main():
                             ibar_scores
                         )
                     },
+                    "snapshot_ibar_counts": {
+                        str(i): int(c)
+                        for i, c in enumerate(ibar_counts)
+                        if c
+                    },
                 }
             )
 
     # --------------------------------------------------------
-    # Check PCI / i_bar consistency
+    # Select one SSB beam (i_bar_SSB) and estimate H
     # --------------------------------------------------------
+    # H is only comparable between snapshots of the same SSB beam: another
+    # beam has another beamforming and another DM-RS reference. Only the
+    # snapshots of the target i_bar_SSB are kept, for every label, and the
+    # online pipeline rejects grids of other beams in the same way.
 
-    all_pci = set()
-    all_ibar = set()
+    all_pci = {
+        session["pci"]
+        for label in labels
+        for session in pending_sessions[label]
+    }
+
+    if len(all_pci) > 1:
+        raise RuntimeError(
+            f"Different PCI values were detected across sessions: {sorted(all_pci)}. "
+            "Train one model per cell."
+        )
+
+    all_snapshot_ibar = np.concatenate(
+        [
+            session["snapshot_ibar"]
+            for label in labels
+            for session in pending_sessions[label]
+        ]
+    )
+
+    if args.target_ibar is not None:
+        target_ibar = int(args.target_ibar)
+    else:
+        target_ibar = int(np.bincount(all_snapshot_ibar, minlength=8).argmax())
+
+    print()
+    print("=" * 80)
+    print(f"TARGET SSB BEAM: i_bar_SSB={target_ibar}")
+    print("=" * 80)
 
     for label in labels:
 
-        for session in processed_sessions[
-            label
-        ]:
-            all_pci.add(
-                session["pci"]
+        kept_total = 0
+
+        for session, summary in zip(pending_sessions[label], detection_summary[label]):
+
+            keep = session["snapshot_ibar"] == target_ibar
+            n_keep = int(np.count_nonzero(keep))
+            summary["kept_snapshots"] = n_keep
+            summary["target_ibar"] = target_ibar
+            kept_total += n_keep
+
+            print(
+                f"{label}: {Path(session['path']).parent.name}: "
+                f"kept {n_keep}/{keep.size} snapshots"
             )
 
-            all_ibar.add(
-                session["ibar"]
+            if n_keep == 0:
+                continue
+
+            channel = estimate_channel(
+                session["rxgrid"][:, :, keep],
+                session["pci"],
+                target_ibar,
             )
 
-    if len(all_pci) > 1:
-        warnings.warn(
-            "Different PCI values were detected "
-            "across sessions."
-        )
+            processed_sessions[label].append(
+                {
+                    "path": session["path"],
+                    "H": channel,
+                    "pci": session["pci"],
+                    "nid1": session["nid1"],
+                    "nid2": session["nid2"],
+                    "ibar": target_ibar,
+                }
+            )
 
-    if len(all_ibar) > 1:
-        warnings.warn(
-            "Different i_bar_SSB values were detected "
-            "across sessions. Interpret cross-class "
-            "comparisons carefully."
-        )
+        if kept_total < 10:
+            raise RuntimeError(
+                f"Label {label!r} has only {kept_total} snapshots on i_bar_SSB={target_ibar}. "
+                "Its captures were taken on another SSB beam, so it cannot be compared "
+                "with the other labels. Recapture it or choose --target-ibar."
+            )
+
+    del pending_sessions
 
     # --------------------------------------------------------
     # Concatenate sessions for each label

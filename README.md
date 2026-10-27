@@ -1004,20 +1004,24 @@ Optional arguments:
 ```text
 --top-k N            number of Fisher-selected resource elements (default: 64)
 --random-traces N    random channel-magnitude traces plotted per class (default: 10)
+--target-ibar N      SSB beam (i_bar_SSB) to train on (default: most frequent)
 --seed N             reproducible random seed (default: 42)
 ```
+
+`detection_summary.json` lists, per session, the per-snapshot `i_bar_SSB` counts and how many snapshots were kept.
 
 ### What the script does
 
 1. Loads `rxGridSSB [240, 4, N]` from every session.
-2. Detects the cell's PCI (NID1 from SSS correlation, NID2 from the H5 attribute `force_nid2`) and the `i_bar_SSB` (PBCH DM-RS correlation) of every session, and reports the agreement between snapshots.
-3. Estimates the channel `H` from SSS and PBCH DM-RS and computes `20·log10|H|` normalised by its own snapshot mean, which removes slow global gain changes.
-4. Plots random snapshots, mean profiles, the temporal channel level and an exploratory PCA.
-5. Splits the time-ordered samples of every class 60% / 20% / 20% (train / validation / test).
-6. Ranks every resource element with a multi-class Fisher score **fitted on the training portion only** and keeps the top `--top-k`.
-7. Builds the feature vector: the selected REs + 9 spectral features (low/mid/high band means and standard deviations and the band differences).
-8. Trains `StandardScaler + LogisticRegression(class_weight="balanced")`, reports validation metrics, retrains on train + validation and reports the final test metrics and confusion matrix.
-9. Exports the deployment artifacts.
+2. Detects the cell's PCI (NID1 from SSS correlation, NID2 from the H5 attribute `force_nid2`) and the `i_bar_SSB` (PBCH DM-RS correlation) **of every snapshot**. The receiver can lock onto different SSB beams within one session; each beam has its own beamforming and DM-RS reference, so `H` is only comparable within one beam.
+3. Keeps only the snapshots of the target beam (`--target-ibar`, default: the most frequent `i_bar_SSB` in the dataset) for every label, and fails if a label has (almost) no snapshots on that beam: that label was captured on another beam and cannot be compared with the others.
+4. Estimates the channel `H` from SSS and PBCH DM-RS and computes `20·log10|H|` normalised by its own snapshot mean, which removes slow global gain changes.
+5. Plots random snapshots, mean profiles, the temporal channel level and an exploratory PCA.
+6. Splits the time-ordered samples of every class 60% / 20% / 20% (train / validation / test).
+7. Ranks every resource element with a multi-class Fisher score **fitted on the training portion only** and keeps the top `--top-k`.
+8. Builds the feature vector: the selected REs + 9 spectral features (low/mid/high band means and standard deviations and the band differences).
+9. Trains `StandardScaler + LogisticRegression(class_weight="balanced")`, reports validation metrics, retrains on train + validation and reports the final test metrics and confusion matrix.
+10. Exports the deployment artifacts.
 
 ### Outputs
 
@@ -1045,7 +1049,7 @@ The two deployment artifacts are:
 - `model_fisher_logreg.joblib`: the original scikit-learn pipeline, for offline evaluation;
 - `model_fisher_logreg.pt`: the PyTorch checkpoint used online. The scaler is folded into a single linear layer, so its probabilities are identical to the scikit-learn pipeline (verified by the [tests](#tests)). It also stores the class names, the selected REs, the feature definition and the radio configuration (PCI, i_bar_SSB) of the training data.
 
-If sessions were recorded with different PCI or i_bar_SSB values, the script warns and stores the most frequent pair; online grids with another i_bar_SSB are then rejected.
+Sessions from different cells (PCI) are refused. The checkpoint stores the target `i_bar_SSB`; online grids of other beams are rejected by the radio check, exactly as they were discarded for training.
 
 The default evaluation splits the time-ordered samples of every class into 60% training, 20% validation and 20% test. This is useful as an initial within-session baseline, but samples from the same acquisition may still occur in different splits. Do not interpret its final-test metrics as performance on an independent experiment. For a deployment claim, reserve entire sessions or collection days for testing.
 

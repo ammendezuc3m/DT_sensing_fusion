@@ -1,6 +1,6 @@
 # DT_sensing_fusion
 
-Passive 5G SSB sensing with a USRP B210, Python UHD processing, a Fisher + logistic-regression fingerprinting model and a CAPIF-exposed Sensing API.
+Passive 5G SSB sensing with a USRP, Python UHD processing, a Fisher + logistic-regression fingerprinting model and a CAPIF-exposed Sensing API.
 
 This repository implements the **5G SSB and WiFi CSI sensing components** of a larger Digital Twin system. It receives 5G Synchronization Signal Blocks (SSBs), extracts an `rxGridSSB` representation, estimates the radio channel, classifies the scene with a model trained on your own labelled captures, converts the predicted class into objects with coordinates, and **publishes them through the Sensing API**: a REST API registered in a CAPIF Core Function (3GPP TS 29.222) so that any consumer (Digital Twin, Sionna, dashboards) can discover it and read the results.
 
@@ -44,7 +44,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ```text
 Sensing computer
-  USRP B210
+  USRP
     → Python UHD IQ capture
     → CFO estimation and correction
     → PSS/NID2 detection and timing synchronization
@@ -110,7 +110,7 @@ This repository currently contains the **5G sensing, inference and publication s
 
 It does include:
 
-- USRP B210 capture;
+- USRP capture;
 - Python-only 5G SSB processing;
 - CFO correction;
 - `dataSSB` and `rxGridSSB` extraction;
@@ -139,13 +139,13 @@ Older models (the binary CNN, threshold backend, ROI/hybrid experiments) and the
 
 Follow these steps in order on a new Ubuntu computer.
 
-## Step 1 — Connect the USRP B210
+## Step 1 — Connect the USRP
 
-1. Connect the USRP B210 to the computer using a USB 3 cable.
-2. Connect the receiving antenna to the physical `RX2` port.
+1. Connect the USRP to the sensing computer using the transport required by that device.
+2. Connect the receiving antenna to the receive port that will be used by the sensing script.
 3. Do not start the sensing script yet.
 
-A USB 3 connection is important because the receiver must continuously transfer large IQ sample blocks to the computer.
+Use the transport and receive-port configuration supported by the installed USRP. A B210 connected through USB 3 and using `RX2` is one supported example; the validation setup used an X410.
 
 ---
 
@@ -183,6 +183,7 @@ sudo apt update
 
 sudo apt install -y \
   git \
+  curl \
   python3 \
   python3-pip \
   python3-venv \
@@ -397,7 +398,7 @@ Run:
 uhd_find_devices
 ```
 
-A correctly connected device should appear as a B210 and include information similar to:
+A correctly connected device should appear in the output. For example, a B210 is reported as:
 
 ```text
 Device Address:
@@ -422,8 +423,7 @@ The exact serial number must not be hard-coded in the documentation because it i
 
 If no device is detected, verify:
 
-- that the USRP is powered through the USB connection;
-- that a USB 3 cable and USB 3 port are being used;
+- that the USRP is powered and connected using the transport required by that model;
 - that no other process is currently using the device;
 - that the UHD packages were installed correctly.
 

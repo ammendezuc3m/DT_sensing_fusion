@@ -22,6 +22,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -102,6 +103,10 @@ def configure_usrp(args: argparse.Namespace) -> uhd.usrp.MultiUSRP:
     print(f"Requested gain:   {args.gain:.2f} dB")
     print(f"Actual gain:      {usrp.get_rx_gain(ch):.2f} dB")
 
+    logging.getLogger("ssb.uhd").info(
+        "USRP configured: motherboard=%s rate=%s freq=%s gain=%s channel=%s antenna=%s",
+        usrp.get_mboard_name(), usrp.get_rx_rate(ch), usrp.get_rx_freq(ch),
+        usrp.get_rx_gain(ch), ch, args.antenna)
     return usrp
 
 
@@ -125,15 +130,34 @@ def capture_one_block(
     cmd = uhd.types.StreamCMD(uhd.types.StreamMode.num_done)
     cmd.num_samps = total_samples
     cmd.stream_now = True
-    rx_streamer.issue_stream_cmd(cmd)
+    try:
+        rx_streamer.issue_stream_cmd(cmd)
+    except Exception:
+        logging.getLogger("ssb.uhd").exception(
+            "UHD stream command failed: mode=num_done samples=%d stream_now=True", total_samples)
+        raise
 
     received = 0
 
     while received < total_samples:
         n_to_recv = min(max_samps, total_samples - received)
-        num_rx = rx_streamer.recv(buffer[:n_to_recv], metadata, timeout)
+        try:
+            num_rx = rx_streamer.recv(buffer[:n_to_recv], metadata, timeout)
+        except Exception:
+            logging.getLogger("ssb.uhd").exception(
+                "UHD recv raised: received=%d requested=%d chunk=%d timeout_s=%s",
+                received, total_samples, n_to_recv, timeout)
+            raise
 
         if metadata.error_code != uhd.types.RXMetadataErrorCode.none:
+            details = {key: str(getattr(metadata, key, None)) for key in (
+                "error_code", "has_time_spec", "start_of_burst", "end_of_burst",
+                "out_of_sequence", "more_fragments", "fragment_offset")}
+            if getattr(metadata, "has_time_spec", False):
+                details["device_time_s"] = metadata.time_spec.get_real_secs()
+            logging.getLogger("ssb.uhd").error(
+                "UHD RX metadata error: %s received=%d requested=%d last_recv=%d timeout_s=%s metadata=%s",
+                metadata.strerror(), received, total_samples, num_rx, timeout, details)
             raise RuntimeError(f"UHD RX error: {metadata.strerror()}")
 
         if num_rx > 0:

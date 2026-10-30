@@ -2323,6 +2323,28 @@ The radio parameters of a trained model are the ones stored in its dataset (`fre
 
 ---
 
+## UHD diagnostic logs during online 5G inference
+
+Every execution of `online_5g_ssb_sensing.py` automatically creates a separate pair of
+files under `uhd_logs/` next to the `--log-csv` file (by default,
+`results/online/uhd_logs/`). Their names include the UTC start time and process ID:
+
+- `*_uhd.log`: native UHD driver messages, including device initialization and driver diagnostics.
+- `*_receiver.log`: UTC timestamps, requested and actual radio configuration, iteration numbers,
+  full Python exception traces, CFO warmup errors, and RX metadata on reception failures
+  (samples received/requested, timeout, burst/sequence flags and device time when available).
+
+The script prints both paths at startup. Keep both files together with the inference CSV
+when reporting a failure. The receiver log is written even if initialization or CFO warmup fails.
+
+Optional arguments: `--uhd-log-dir PATH` changes the directory; `--uhd-log-level debug`
+sets the native file verbosity (default `debug`; use `trace` for more detail).
+Native logging is configured before loading UHD using its documented
+[`UHD_LOG_FILE`, `UHD_LOG_LEVEL` and `UHD_LOG_FILE_LEVEL` settings](https://kb.ettus.com/The_UHD_logging_facility).
+Messages available in the native file depend on how the installed UHD library was compiled.
+Run the script in a fresh Python process so these settings take effect.
+API credentials are not included in the diagnostic configuration log.
+
 ## The script reports `err=ibar_mismatch`, `err=pci_mismatch` or `err=nid2_mismatch`
 
 The received SSB does not match the PCI/i_bar_SSB the model was trained with (see [the radio check](#radio-check-pci-and-i_bar_ssb)).

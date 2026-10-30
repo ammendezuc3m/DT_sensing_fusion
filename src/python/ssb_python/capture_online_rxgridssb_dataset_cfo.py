@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import sys
 import time
 from pathlib import Path
@@ -157,6 +158,7 @@ def estimate_cfo_warmup(
             )
 
         except Exception as exc:
+            logging.getLogger("ssb.uhd").exception("CFO warmup failed at iteration=%d", i)
             row["error"] = str(exc)
 
         rows.append(row)

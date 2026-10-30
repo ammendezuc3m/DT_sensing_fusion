@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import os
 import sys
 import time
@@ -37,13 +38,35 @@ for path in (THIS_DIR, THIS_DIR.parent):
         sys.path.insert(0, str(path))
 
 from cfo_utils import apply_frequency_correction  # noqa: E402
-from capture_online_rxgridssb_dataset_cfo import estimate_cfo_warmup  # noqa: E402
-from profile_online_datassb_pipeline import (  # noqa: E402
-    capture_one_block,
-    configure_usrp,
-    extract_rxgrid_from_waveform,
-    make_rx_streamer,
-)
+# Import the radio helpers lazily: UHD reads its logging environment when loaded.
+from uhd_diagnostics import start_diagnostics, stop_diagnostics  # noqa: E402
+
+
+def estimate_cfo_warmup(*args, **kwargs):
+    from capture_online_rxgridssb_dataset_cfo import estimate_cfo_warmup as impl
+    return impl(*args, **kwargs)
+
+
+def configure_usrp(*args, **kwargs):
+    from profile_online_datassb_pipeline import configure_usrp as impl
+    return impl(*args, **kwargs)
+
+
+def capture_one_block(*args, **kwargs):
+    from profile_online_datassb_pipeline import capture_one_block as impl
+    return impl(*args, **kwargs)
+
+
+def extract_rxgrid_from_waveform(*args, **kwargs):
+    from profile_online_datassb_pipeline import extract_rxgrid_from_waveform as impl
+    return impl(*args, **kwargs)
+
+
+def make_rx_streamer(*args, **kwargs):
+    from profile_online_datassb_pipeline import make_rx_streamer as impl
+    return impl(*args, **kwargs)
+
+
 from ssb_fisher_torch_inference import SSBFisherTorchModel  # noqa: E402
 from sensing_api.label_map import LabelMap  # noqa: E402
 from sensing_api.mitsuba import HumanProxyGeometry, HumanRadioMaterial, make_mitsuba_scene_xml  # noqa: E402
@@ -115,6 +138,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--api-timeout-sec", type=float, default=2.0)
     p.add_argument("--publish-every", type=int, default=1, help="Publish one report every N iterations.")
     p.add_argument("--disable-api", action="store_true", help="Run without publishing to the Sensing API.")
+
+    p.add_argument("--uhd-log-dir", default="",
+                   help="Diagnostic directory (default: uhd_logs next to --log-csv).")
+    p.add_argument("--uhd-log-level", choices=["trace", "debug", "info", "warning", "error", "fatal"],
+                   default="debug", help="Native UHD file logging level (default: debug).")
 
     # Local outputs.
     p.add_argument("--local-json", default="results/online/live_inference_state_5G.json")
@@ -233,6 +261,7 @@ def process_iteration(
         result["inference_time_ms"] = 1000.0 * (time.perf_counter() - t1)
         result["valid"] = True
     except Exception as exc:  # keep the online loop alive on capture/DSP failures
+        logging.getLogger("ssb.uhd").exception("Online capture/DSP/inference failed")
         result["error"] = f"{type(exc).__name__}: {exc}"
     return result
 
@@ -266,6 +295,17 @@ def make_local_state(iteration: int, timestamp: str, result: dict, report: dict,
 
 def main() -> None:
     args = parse_args()
+    logger = start_diagnostics(args)
+    try:
+        run_online(args)
+    except BaseException:
+        logger.exception("Online process terminated")
+        raise
+    finally:
+        stop_diagnostics(logger)
+
+
+def run_online(args: argparse.Namespace) -> None:
 
     model = None
     if not args.dsp_only:
@@ -360,6 +400,7 @@ def main() -> None:
 
             while args.num_iters == 0 or i < args.num_iters:
                 loop_t0 = time.perf_counter()
+                logging.getLogger("ssb.uhd").debug("iteration=%d capture starting", i)
                 result = process_iteration(
                     rx_streamer, samples_per_block, max_samps, actual_rate, cfo_hz, apply_cfo, args, model
                 )
